@@ -1,0 +1,251 @@
+// Prisma schema for Intelligent Healthcare Queue & CDSS
+// Reference: src/modules/* (each module maps to one or more models below)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ---------- Enums ----------
+
+enum Role {
+  PATIENT
+  DOCTOR
+  ADMIN
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum QueueStatus {
+  WAITING
+  CALLED
+  IN_PROGRESS
+  DONE
+  SKIPPED
+  CANCELLED
+}
+
+enum AppointmentStatus {
+  BOOKED
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  NO_SHOW
+}
+
+enum DayOfWeek {
+  MONDAY
+  TUESDAY
+  WEDNESDAY
+  THURSDAY
+  FRIDAY
+  SATURDAY
+  SUNDAY
+}
+
+// ---------- Auth / Users ----------
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         Role     @default(PATIENT)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  patient       Patient?
+  doctor        Doctor?
+  refreshTokens RefreshToken[]
+
+  @@index([role])
+}
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ---------- Domain ----------
+
+model Patient {
+  id         String    @id @default(cuid())
+  userId     String    @unique
+  nik        String?   @unique
+  bpjsNumber String?   @unique
+  phone      String?
+  gender     Gender?
+  birthDate  DateTime?
+  address    String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  queues       Queue[]
+  appointments Appointment[]
+  cdssResults  CDSSResult[]
+}
+
+model Doctor {
+  id             String   @id @default(cuid())
+  userId         String   @unique
+  specialization String
+  licenseNumber  String?  @unique
+  departmentId   String?
+  avgServiceMin  Int      @default(10) // rata-rata durasi layanan (menit), dipakai heuristik ETA
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  department   Department?   @relation(fields: [departmentId], references: [id])
+  schedules    Schedule[]
+  queues       Queue[]
+  appointments Appointment[]
+
+  @@index([departmentId])
+}
+
+model Department {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  doctors      Doctor[]
+  schedules    Schedule[]
+  queues       Queue[]
+  appointments Appointment[]
+}
+
+model Schedule {
+  id           String    @id @default(cuid())
+  doctorId     String
+  departmentId String
+  dayOfWeek    DayOfWeek
+  startTime    String // "HH:mm", disimpan string agar agnostik timezone
+  endTime      String // "HH:mm"
+  capacity     Int       @default(30)
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  doctor       Doctor        @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  department   Department    @relation(fields: [departmentId], references: [id])
+  queues       Queue[]
+  appointments Appointment[]
+
+  @@index([doctorId, dayOfWeek])
+  @@index([departmentId, dayOfWeek])
+}
+
+model Queue {
+  id                   String      @id @default(cuid())
+  patientId            String
+  departmentId         String
+  doctorId             String?
+  scheduleId           String?
+  queueNumber          Int
+  status               QueueStatus @default(WAITING)
+  queueDate            DateTime    @db.Date
+  checkInAt            DateTime    @default(now())
+  calledAt             DateTime?
+  startedAt            DateTime?
+  finishedAt           DateTime?
+  cancelledAt          DateTime?
+  estimatedWaitMinutes Int?
+  actualWaitMinutes    Int?
+  notes                String?
+  createdAt            DateTime    @default(now())
+  updatedAt            DateTime    @updatedAt
+
+  patient    Patient             @relation(fields: [patientId], references: [id])
+  department Department          @relation(fields: [departmentId], references: [id])
+  doctor     Doctor?             @relation(fields: [doctorId], references: [id])
+  schedule   Schedule?           @relation(fields: [scheduleId], references: [id])
+  prediction WaitTimePrediction?
+
+  @@unique([departmentId, queueDate, queueNumber])
+  @@index([status])
+  @@index([queueDate])
+  @@index([patientId])
+}
+
+model Appointment {
+  id           String            @id @default(cuid())
+  patientId    String
+  doctorId     String
+  departmentId String
+  scheduleId   String?
+  scheduledAt  DateTime
+  status       AppointmentStatus @default(BOOKED)
+  notes        String?
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  patient    Patient    @relation(fields: [patientId], references: [id])
+  doctor     Doctor     @relation(fields: [doctorId], references: [id])
+  department Department @relation(fields: [departmentId], references: [id])
+  schedule   Schedule?  @relation(fields: [scheduleId], references: [id])
+
+  @@index([patientId])
+  @@index([doctorId])
+  @@index([scheduledAt])
+}
+
+model WaitTimePrediction {
+  id           String   @id @default(cuid())
+  queueId      String   @unique
+  estimatedMin Int
+  source       String // "ml" | "heuristic"
+  modelVersion String?
+  features     Json?
+  createdAt    DateTime @default(now())
+
+  queue Queue @relation(fields: [queueId], references: [id], onDelete: Cascade)
+}
+
+// ---------- CDSS ----------
+
+model Symptom {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  label       String
+  description String?
+  createdAt   DateTime @default(now())
+}
+
+model CDSSResult {
+  id         String   @id @default(cuid())
+  patientId  String?
+  doctorId   String?
+  symptoms   Json // array of symptom codes or labels
+  candidates Json // [{ diagnosis, confidence, reasoning? }]
+  engine     String // "rule-based" | "ml"
+  createdAt  DateTime @default(now())
+
+  patient Patient? @relation(fields: [patientId], references: [id])
+
+  @@index([patientId])
+  @@index([doctorId])
+}

@@ -2,5 +2,40 @@
 database_schema.md
 PRD.md
 
-# Exclude Claude Code directory
+# OS
 .DS_Store
+
+# Exclude local project skill from repository
+.agents/*
+skills-lock.json
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build output
+dist/
+coverage/
+*.tsbuildinfo
+
+# Env
+.env
+.env.local
+.env.development
+.env.production
+.env.test
+
+# IDE
+.idea/
+.vscode/
+
+# Logs
+logs/
+*.log
+
+# Prisma
+prisma/*.db
+prisma/*.db-journal
