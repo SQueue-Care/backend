@@ -74,3 +74,16 @@ export async function getPatientQueues(patientId: string) {
     include: { department: true, doctor: { include: { user: { select: { name: true } } } } },
   });
 }
+
+export async function getPatientAppointments(patientId: string) {
+  return prisma.appointment.findMany({
+    where: { patientId },
+    orderBy: { scheduledAt: "desc" },
+    include: {
+      patient: { include: PATIENT_INCLUDE },
+      doctor: { include: { user: { select: { name: true } } } },
+      department: true,
+      schedule: true,
+    },
+  });
+}

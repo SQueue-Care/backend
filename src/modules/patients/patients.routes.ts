@@ -72,4 +72,13 @@ router.get(
   }),
 );
 
+router.get(
+  "/:id/appointments",
+  validate({ params: patientIdParamSchema }),
+  asyncHandler(async (req, res) => {
+    const appointments = await service.getPatientAppointments(getParam(req, "id"));
+    res.json(ApiResponse.success(appointments));
+  }),
+);
+
 export default router;
