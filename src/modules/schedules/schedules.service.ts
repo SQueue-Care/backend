@@ -41,3 +41,28 @@ export async function updateSchedule(id: string, data: UpdateScheduleInput) {
 export async function deleteSchedule(id: string) {
   await prisma.schedule.delete({ where: { id } });
 }
+
+export async function getScheduleCapacity(scheduleId: string) {
+  const schedule = await prisma.schedule.findUnique({
+    where: { id: scheduleId },
+    include: {
+      _count: {
+        select: {
+          appointments: {
+            where: {
+              status: { in: ["BOOKED", "CONFIRMED"] }
+            }
+          }
+        }
+      }
+    }
+  });
+
+  if (!schedule) throw new NotFoundError("Schedule tidak ditemukan");
+
+  return {
+    total: schedule.capacity,
+    booked: schedule._count.appointments,
+    available: schedule.capacity - schedule._count.appointments
+  };
+}

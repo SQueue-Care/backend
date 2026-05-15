@@ -39,6 +39,16 @@ router.get(
   }),
 );
 
+router.get(
+  "/:id/appointments",
+  authenticate,
+  validate({ params: doctorIdParamSchema }),
+  asyncHandler(async (req, res) => {
+    const appointments = await service.getDoctorAppointments(getParam(req, "id"));
+    res.json(ApiResponse.success(appointments));
+  }),
+);
+
 router.post(
   "/",
   authenticate,

@@ -92,6 +92,14 @@ export async function createQueue(input: CreateQueueInput, actor: Express.UserPa
     include: QUEUE_INCLUDE,
   });
 
+  // Decrement schedule capacity
+  if (input.scheduleId) {
+    await prisma.schedule.update({
+      where: { id: input.scheduleId },
+      data: { capacity: { decrement: 1 } }
+    });
+  }
+
   return queue;
 }
 
@@ -164,7 +172,17 @@ export async function updateQueueStatus(
   }
   if (input.status === QueueStatus.CANCELLED) data.cancelledAt = now;
 
-  return prisma.queue.update({ where: { id }, data, include: QUEUE_INCLUDE });
+  const updated = await prisma.queue.update({ where: { id }, data, include: QUEUE_INCLUDE });
+
+  // Increment schedule capacity when queue status changes to CANCELLED
+  if (input.status === QueueStatus.CANCELLED && queue.status !== QueueStatus.CANCELLED && queue.scheduleId) {
+    await prisma.schedule.update({
+      where: { id: queue.scheduleId },
+      data: { capacity: { increment: 1 } }
+    });
+  }
+
+  return updated;
 }
 
 export async function cancelQueue(id: string, actor: Express.UserPayload) {
@@ -182,11 +200,21 @@ export async function cancelQueue(id: string, actor: Express.UserPayload) {
     throw new BadRequestError("Antrian sudah tidak aktif");
   }
 
-  return prisma.queue.update({
+  const updated = await prisma.queue.update({
     where: { id },
     data: { status: QueueStatus.CANCELLED, cancelledAt: new Date() },
     include: QUEUE_INCLUDE,
   });
+
+  // Increment schedule capacity when queue is cancelled
+  if (queue.scheduleId) {
+    await prisma.schedule.update({
+      where: { id: queue.scheduleId },
+      data: { capacity: { increment: 1 } }
+    });
+  }
+
+  return updated;
 }
 
 export async function overviewStats(date?: Date) {
