@@ -73,3 +73,16 @@ export async function getDoctorSchedules(doctorId: string) {
     include: { department: true },
   });
 }
+
+export async function getDoctorAppointments(doctorId: string) {
+  return prisma.appointment.findMany({
+    where: { doctorId },
+    orderBy: { scheduledAt: "desc" },
+    include: {
+      patient: { include: { user: { select: { name: true, email: true } } } },
+      doctor: { include: { user: { select: { name: true } } } },
+      department: true,
+      schedule: true,
+    },
+  });
+}
