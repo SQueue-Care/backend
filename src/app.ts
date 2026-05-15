@@ -3,6 +3,7 @@ import cors from "cors";
 import express, { type Express } from "express";
 import helmet from "helmet";
 import { env } from "./config/env";
+import { setupSwagger } from "./docs/swagger";
 import { errorHandler, notFoundHandler } from "./middleware/error-handler";
 import { apiLimiter } from "./middleware/rate-limit.middleware";
 import { requestLogger } from "./middleware/request-logger";
@@ -33,6 +34,8 @@ export function createApp(): Express {
   app.get("/ready", (_req, res) => {
     res.json(ApiResponse.success({ ready: true }));
   });
+
+  setupSwagger(app);
 
   app.use("/api/v1", apiLimiter, apiRouter);
 
