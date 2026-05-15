@@ -42,7 +42,20 @@ export async function createAppointment(input: CreateAppointmentInput, actor: Ex
     }
   }
 
-  return prisma.appointment.create({
+  // Check and decrement schedule capacity
+  if (input.scheduleId) {
+    const schedule = await prisma.schedule.findUnique({
+      where: { id: input.scheduleId }
+    });
+
+    if (!schedule) throw new NotFoundError("Schedule tidak ditemukan");
+
+    if (schedule.capacity <= 0) {
+      throw new BadRequestError("Kapasitas jadwal sudah penuh");
+    }
+  }
+
+  const appointment = await prisma.appointment.create({
     data: {
       patientId,
       doctorId: input.doctorId,
@@ -53,12 +66,50 @@ export async function createAppointment(input: CreateAppointmentInput, actor: Ex
     },
     include: INCLUDE,
   });
+
+  // Decrement schedule capacity
+  if (input.scheduleId) {
+    await prisma.schedule.update({
+      where: { id: input.scheduleId },
+      data: { capacity: { decrement: 1 } }
+    });
+  }
+
+  return appointment;
 }
 
 export async function updateAppointment(id: string, data: UpdateAppointmentInput) {
+  const appointment = await prisma.appointment.findUnique({
+    where: { id }
+  });
+
+  if (!appointment) throw new NotFoundError("Appointment tidak ditemukan");
+
+  // If status changed to CANCELLED, increment capacity
+  if (data.status === "CANCELLED" && appointment.status !== "CANCELLED" && appointment.scheduleId) {
+    await prisma.schedule.update({
+      where: { id: appointment.scheduleId },
+      data: { capacity: { increment: 1 } }
+    });
+  }
+
   return prisma.appointment.update({ where: { id }, data, include: INCLUDE });
 }
 
 export async function deleteAppointment(id: string) {
+  const appointment = await prisma.appointment.findUnique({
+    where: { id }
+  });
+
+  if (!appointment) throw new NotFoundError("Appointment tidak ditemukan");
+
+  // Increment capacity when deleting appointment
+  if (appointment.scheduleId) {
+    await prisma.schedule.update({
+      where: { id: appointment.scheduleId },
+      data: { capacity: { increment: 1 } }
+    });
+  }
+
   await prisma.appointment.delete({ where: { id } });
 }

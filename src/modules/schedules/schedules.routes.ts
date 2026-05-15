@@ -34,6 +34,15 @@ router.get(
   }),
 );
 
+router.get(
+  "/:id/capacity",
+  validate({ params: scheduleIdParamSchema }),
+  asyncHandler(async (req, res) => {
+    const capacity = await service.getScheduleCapacity(getParam(req, "id"));
+    res.json(ApiResponse.success(capacity));
+  }),
+);
+
 router.post(
   "/",
   authenticate,
