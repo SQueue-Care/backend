@@ -39,6 +39,27 @@ router.get(
 );
 
 router.get(
+  "/stats/range",
+  authorize(Role.ADMIN, Role.DOCTOR),
+  asyncHandler(async (req, res) => {
+    const days = typeof req.query.days === "string" ? parseInt(req.query.days, 10) : 7;
+    const stats = await service.rangeStats(days);
+    res.json(ApiResponse.success(stats));
+  }),
+);
+
+router.get(
+  "/stats/analytics",
+  authorize(Role.ADMIN, Role.DOCTOR),
+  asyncHandler(async (req, res) => {
+    const from = typeof req.query.from === "string" ? new Date(req.query.from) : new Date();
+    const to = typeof req.query.to === "string" ? new Date(req.query.to) : new Date();
+    const stats = await service.analyticsStats(from, to);
+    res.json(ApiResponse.success(stats));
+  }),
+);
+
+router.get(
   "/",
   authorize(Role.ADMIN, Role.DOCTOR),
   validate({ query: listQueuesQuerySchema }),

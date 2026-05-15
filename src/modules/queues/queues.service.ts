@@ -256,3 +256,159 @@ export async function overviewStats(date?: Date) {
 
   return { date: target, departments: Object.values(result) };
 }
+
+export async function rangeStats(days: number = 7) {
+  const days_clamped = Math.min(Math.max(days, 1), 30);
+  const endDate = startOfDay();
+  const startDate = new Date(endDate);
+  startDate.setDate(startDate.getDate() - days_clamped + 1);
+
+  const byDateDept = await prisma.queue.groupBy({
+    by: ["queueDate", "departmentId"],
+    where: { queueDate: { gte: startDate, lte: endDate } },
+    _count: { _all: true },
+  });
+
+  const departments = await prisma.department.findMany();
+  const deptIndex = new Map(departments.map((d) => [d.id, d]));
+
+  const result: Map<string, { date: string; departments: Array<{ departmentId: string; code: string; name: string; total: number }> }> = new Map();
+
+  for (const row of byDateDept) {
+    const dateKey = row.queueDate.toISOString().split('T')[0];
+    const dept = deptIndex.get(row.departmentId);
+    if (!dept) continue;
+
+    if (!result.has(dateKey)) {
+      result.set(dateKey, { date: dateKey, departments: [] });
+    }
+
+    const entry = result.get(dateKey);
+    if (!entry) continue;
+
+    const deptEntry = entry.departments.find((d) => d.departmentId === dept.id);
+    if (deptEntry) {
+      deptEntry.total += row._count._all;
+    } else {
+      entry.departments.push({
+        departmentId: dept.id,
+        code: dept.code,
+        name: dept.name,
+        total: row._count._all,
+      });
+    }
+  }
+
+  const sortedResult = Array.from(result.values()).sort(
+    (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
+  );
+
+  return sortedResult;
+}
+
+export async function analyticsStats(fromDate: Date, toDate: Date) {
+  const startDate = startOfDay(fromDate);
+  const endDate = startOfDay(toDate);
+  endDate.setDate(endDate.getDate() + 1);
+
+  const byDateDept = await prisma.queue.groupBy({
+    by: ["queueDate", "departmentId", "status"],
+    where: { queueDate: { gte: startDate, lt: endDate } },
+    _count: { _all: true },
+    _avg: { actualWaitMinutes: true },
+  });
+
+  const departments = await prisma.department.findMany();
+  const deptIndex = new Map(departments.map((d) => [d.id, d]));
+
+  let totalQueues = 0;
+  let totalDone = 0;
+  let totalCancelled = 0;
+  let totalSkipped = 0;
+  let totalWaitMinutes = 0;
+  let doneCount = 0;
+
+  const byDate: Map<string, { total: number; done: number; cancelled: number; skipped: number }> = new Map();
+  const byDept: Map<string, { total: number; done: number; cancelled: number; waitSum: number; waitCount: number }> = new Map();
+
+  for (const row of byDateDept) {
+    const dateKey = row.queueDate.toISOString().split('T')[0];
+    const dept = deptIndex.get(row.departmentId);
+    if (!dept) continue;
+
+    totalQueues += row._count._all;
+
+    if (row.status === QueueStatus.DONE) {
+      totalDone += row._count._all;
+      if (row._avg.actualWaitMinutes) {
+        totalWaitMinutes += Math.round(row._avg.actualWaitMinutes * row._count._all);
+        doneCount += row._count._all;
+      }
+    } else if (row.status === QueueStatus.CANCELLED) {
+      totalCancelled += row._count._all;
+    } else if (row.status === QueueStatus.SKIPPED) {
+      totalSkipped += row._count._all;
+    }
+
+    if (!byDate.has(dateKey)) {
+      byDate.set(dateKey, { total: 0, done: 0, cancelled: 0, skipped: 0 });
+    }
+    const dateEntry = byDate.get(dateKey)!;
+    dateEntry.total += row._count._all;
+    if (row.status === QueueStatus.DONE) dateEntry.done += row._count._all;
+    if (row.status === QueueStatus.CANCELLED) dateEntry.cancelled += row._count._all;
+    if (row.status === QueueStatus.SKIPPED) dateEntry.skipped += row._count._all;
+
+    const deptKey = dept.id;
+    if (!byDept.has(deptKey)) {
+      byDept.set(deptKey, { total: 0, done: 0, cancelled: 0, waitSum: 0, waitCount: 0 });
+    }
+    const deptEntry = byDept.get(deptKey)!;
+    deptEntry.total += row._count._all;
+    if (row.status === QueueStatus.DONE) {
+      deptEntry.done += row._count._all;
+      if (row._avg.actualWaitMinutes) {
+        deptEntry.waitSum += Math.round(row._avg.actualWaitMinutes * row._count._all);
+        deptEntry.waitCount += row._count._all;
+      }
+    }
+    if (row.status === QueueStatus.CANCELLED) deptEntry.cancelled += row._count._all;
+  }
+
+  const avgWaitMinutes = doneCount > 0 ? Math.round(totalWaitMinutes / doneCount) : 0;
+  const completionRate = totalQueues > 0 ? Math.round((totalDone / totalQueues) * 100 * 10) / 10 : 0;
+  const cancellationRate = totalQueues > 0 ? Math.round(((totalCancelled + totalSkipped) / totalQueues) * 100 * 10) / 10 : 0;
+
+  const byDateArray = Array.from(byDate.entries())
+    .map(([date, data]) => ({ date, ...data }))
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+  const byDepartmentArray = Array.from(byDept.entries())
+    .map(([deptId, data]) => {
+      const dept = deptIndex.get(deptId);
+      return {
+        departmentId: deptId,
+        name: dept?.name || 'Unknown',
+        code: dept?.code || 'N/A',
+        total: data.total,
+        done: data.done,
+        cancelled: data.cancelled,
+        avgWaitMinutes: data.waitCount > 0 ? Math.round(data.waitSum / data.waitCount) : 0,
+      };
+    })
+    .sort((a, b) => b.total - a.total);
+
+  return {
+    summary: {
+      totalQueues,
+      totalDone,
+      totalCancelled,
+      totalSkipped,
+      completionRate,
+      cancellationRate,
+      avgWaitMinutes,
+    },
+    byDate: byDateArray,
+    byDepartment: byDepartmentArray,
+  };
+}

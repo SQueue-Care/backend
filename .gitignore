@@ -39,3 +39,5 @@ logs/
 # Prisma
 prisma/*.db
 prisma/*.db-journal
+bun.lock
+bun.lock
