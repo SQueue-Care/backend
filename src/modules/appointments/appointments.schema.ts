@@ -24,6 +24,7 @@ export const updateAppointmentSchema = z.object({
     ])
     .optional(),
   notes: z.string().max(500).optional(),
+  cancellationReason: z.string().optional(), //perubahan
 });
 
 export type CreateAppointmentInput = z.infer<typeof createAppointmentSchema>;
