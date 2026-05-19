@@ -71,6 +71,7 @@ async function mlEstimate(query: WaitTimeQuery): Promise<WaitTimeEstimate | null
     });
 
     const waitingAhead = activeQueues.filter((q) => q.status === QueueStatus.WAITING).length;
+    console.log(`[DEBUG ML] Found ${activeQueues.length} active queues (WAITING=${activeQueues.filter(q => q.status === QueueStatus.WAITING).length}) for dept=${query.departmentId.substring(0, 12)}, doctor=${query.doctorId?.substring(0, 12)}, date=${today.toISOString().split('T')[0]}`);
     const avgService =
       activeQueues.find((q) => q.doctor)?.doctor?.avgServiceMin ??
       (query.doctorId
