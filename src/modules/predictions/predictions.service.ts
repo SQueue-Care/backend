@@ -19,8 +19,12 @@ const DEFAULT_AVG_SERVICE_MIN = 10;
  *   ETA = waitingAhead * avgServiceMin(dokter terkait) + inProgressBuffer
  */
 async function heuristicEstimate(query: WaitTimeQuery): Promise<WaitTimeEstimate> {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  // Use same startOfDay logic as createQueue
+  const now = new Date();
+  const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
+  const wibTime = new Date(utc + (3600000 * 7));
+  const wibDateString = wibTime.toISOString().split('T')[0];
+  const today = new Date(`${wibDateString}T12:00:00.000Z`);
 
   const activeQueues = await prisma.queue.findMany({
     where: {
@@ -57,8 +61,12 @@ async function heuristicEstimate(query: WaitTimeQuery): Promise<WaitTimeEstimate
 async function mlEstimate(query: WaitTimeQuery): Promise<WaitTimeEstimate | null> {
   if (!env.ML_SERVICE_URL) return null;
   try {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    // Use same startOfDay logic as createQueue to ensure date matching
+    const now = new Date();
+    const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
+    const wibTime = new Date(utc + (3600000 * 7));
+    const wibDateString = wibTime.toISOString().split('T')[0];
+    const today = new Date(`${wibDateString}T12:00:00.000Z`);
 
     const activeQueues = await prisma.queue.findMany({
       where: {
