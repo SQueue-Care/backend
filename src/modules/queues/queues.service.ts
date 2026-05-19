@@ -11,10 +11,23 @@ const QUEUE_INCLUDE = {
   prediction: true,
 } satisfies Prisma.QueueInclude;
 
-function startOfDay(date: Date = new Date()): Date {
-  const d = new Date(date);
-  d.setHours(0, 0, 0, 0);
-  return d;
+function startOfDay(dateInput?: Date | string): Date {
+  let wibDateString: string;
+
+  if (dateInput) {
+    // Jika ada payload waktu (dari booking frontend)
+    const d = new Date(dateInput);
+    wibDateString = d.toISOString().split('T')[0];
+  } else {
+    // Jika pembuatan langsung (real-time tanpa payload), paksa hitung dengan zona WIB (UTC+7)
+    const now = new Date();
+    const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
+    const wibTime = new Date(utc + (3600000 * 7));
+    wibDateString = wibTime.toISOString().split('T')[0];
+  }
+
+  // Trik 12 Siang Mutlak: Kunci di jam 12 UTC agar Prisma menyimpan tanggal tanpa risiko pergeseran zona waktu
+  return new Date(`${wibDateString}T12:00:00.000Z`);
 }
 
 async function nextQueueNumber(departmentId: string, date: Date): Promise<number> {
@@ -45,13 +58,13 @@ export async function createQueue(input: CreateQueueInput, actor: Express.UserPa
   const department = await prisma.department.findUnique({ where: { id: input.departmentId } });
   if (!department) throw new NotFoundError("Department not found");
 
-  const today = startOfDay();
+  const targetDate = startOfDay(input.date);
 
   const duplicate = await prisma.queue.findFirst({
     where: {
       patientId,
       departmentId: input.departmentId,
-      queueDate: today,
+      queueDate: targetDate,
       status: { in: [QueueStatus.WAITING, QueueStatus.CALLED, QueueStatus.IN_PROGRESS] },
     },
   });
@@ -59,7 +72,7 @@ export async function createQueue(input: CreateQueueInput, actor: Express.UserPa
     throw new BadRequestError("Pasien sudah memiliki antrian aktif di poli ini hari ini");
   }
 
-  const queueNumber = await nextQueueNumber(input.departmentId, today);
+  const queueNumber = await nextQueueNumber(input.departmentId, targetDate);
 
   const estimate = await estimateWaitTime({
     departmentId: input.departmentId,
@@ -74,7 +87,7 @@ export async function createQueue(input: CreateQueueInput, actor: Express.UserPa
       doctorId: input.doctorId,
       scheduleId: input.scheduleId,
       queueNumber,
-      queueDate: today,
+      queueDate: targetDate,
       estimatedWaitMinutes: estimate.estimatedMinutes,
       notes: input.notes,
       prediction: {

@@ -9,6 +9,7 @@ export const createQueueSchema = z.object({
   doctorId: z.string().optional(),
   scheduleId: z.string().optional(),
   notes: z.string().max(500).optional(),
+  date: z.coerce.date().optional(),
 });
 
 export const updateQueueStatusSchema = z.object({
