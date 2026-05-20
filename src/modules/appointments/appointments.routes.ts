@@ -95,4 +95,18 @@ router.get(
   }),
 );
 
+// perubahan 
+router.post(
+  "/:id/check-in",
+  authorize(Role.PATIENT, Role.ADMIN), 
+  validate({ params: appointmentIdParamSchema }),
+  asyncHandler(async (req, res) => {
+    if (!req.user) throw new UnauthorizedError();
+    
+    const newQueue = await service.checkInAppointment(getParam(req, "id"), req.user);
+    
+    res.status(200).json(ApiResponse.success(newQueue));
+  }),
+);
+
 export default router;

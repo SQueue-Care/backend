@@ -1,9 +1,24 @@
-import { createApp } from "./app";
+import { createApp } from "./app"; //import cron untuk penjadwalan reservasi kadaluarsa
 import { env } from "./config/env";
 import { logger } from "./config/logger";
 import { disconnectPrisma } from "./config/prisma";
+import cron from "node-cron";
+
+import { sweepExpiredAppointments } from "./modules/appointments/appointments.service";
 
 const app = createApp();
+
+cron.schedule("0 * * * *", async () => {
+  logger.info("Menjalankan tugas penyisiran reservasi kedaluwarsa...");
+  try {
+    const cancelledCount = await sweepExpiredAppointments();
+    if (cancelledCount > 0) {
+      logger.info(`Berhasil membatalkan otomatis ${cancelledCount} reservasi kedaluwarsa.`);
+    }
+  } catch (error) {
+    logger.error({ err: error }, "Terjadi kesalahan sistem saat menyapu reservasi.");
+  }
+});
 
 const server = app.listen(env.PORT, () => {
   logger.info(`Server listening on http://localhost:${env.PORT} (${env.NODE_ENV})`);
