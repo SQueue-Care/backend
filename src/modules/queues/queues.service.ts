@@ -116,10 +116,41 @@ export async function createQueue(input: CreateQueueInput, actor: Express.UserPa
   return queue;
 }
 
+// Perubahan daftar pasien yang sedang berlangsung 
 export async function getQueue(id: string) {
   const queue = await prisma.queue.findUnique({ where: { id }, include: QUEUE_INCLUDE });
   if (!queue) throw new NotFoundError("Queue not found");
-  return queue;
+
+  const targetDate = startOfDay(queue.queueDate);
+  const activeServing = await prisma.queue.findFirst({
+    where: {
+      departmentId: queue.departmentId,
+      queueDate: targetDate,
+      status: { in: [QueueStatus.CALLED, QueueStatus.IN_PROGRESS] }
+    },
+    orderBy: { queueNumber: 'asc' },
+    select: { queueNumber: true }
+  });
+
+  let currentServingNumber = activeServing?.queueNumber || null;
+
+  if (!currentServingNumber) {
+    const lastDone = await prisma.queue.findFirst({
+      where: {
+        departmentId: queue.departmentId,
+        queueDate: targetDate,
+        status: QueueStatus.DONE
+      },
+      orderBy: { queueNumber: 'desc' },
+      select: { queueNumber: true }
+    });
+    currentServingNumber = lastDone?.queueNumber || null;
+  }
+
+  return {
+    ...queue,
+    currentServingNumber
+  };
 }
 
 export async function listQueues(filters: ListQueuesQuery) {
