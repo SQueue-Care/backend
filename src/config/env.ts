@@ -30,6 +30,13 @@ const envSchema = z.object({
     .optional()
     .transform((v) => (v && v.trim().length > 0 ? v : undefined)),
 
+  LLM_API_BASE_URL: z
+    .string()
+    .optional()
+    .transform((v) => (v && v.trim().length > 0 ? v : undefined)),
+  LLM_API_KEY: z.string().default("any-key"),
+  LLM_MODEL: z.string().optional(),
+
   RATE_LIMIT_WINDOW_MS: z.coerce
     .number()
     .int()

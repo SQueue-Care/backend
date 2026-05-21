@@ -240,13 +240,16 @@ model CDSSResult {
   id         String   @id @default(cuid())
   patientId  String?
   doctorId   String?
-  symptoms   Json // array of symptom codes or labels
-  candidates Json // [{ diagnosis, confidence, reasoning? }]
-  engine     String // "rule-based" | "ml"
+  queueId    String?
+  notes      String?  @db.Text
+  symptoms   Json     // array of symptom codes or labels
+  candidates Json     // [{ diagnosis, confidence, reasoning? }]
+  engine     String   // "hermes-llm" | "rule-based"
   createdAt  DateTime @default(now())
 
   patient Patient? @relation(fields: [patientId], references: [id])
 
   @@index([patientId])
   @@index([doctorId])
+  @@index([queueId])
 }
