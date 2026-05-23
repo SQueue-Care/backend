@@ -41,3 +41,4 @@ prisma/*.db
 prisma/*.db-journal
 bun.lock
 bun.lock
+prisma/migrations/migration_lock.toml

@@ -2,8 +2,39 @@ import { prisma } from "../../config/prisma";
 import { NotFoundError } from "../../utils/errors";
 import type { CreateDepartmentInput, UpdateDepartmentInput } from "./departments.schema";
 
+//Perubahan buat ngasih jumlah pasien
 export async function listDepartments() {
-  return prisma.department.findMany({ orderBy: { name: "asc" } });
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+
+  const departments = await prisma.department.findMany({
+    orderBy: { name: "asc" },
+    include: {
+      doctors: { 
+        include: { 
+          user: { select: { name: true } } 
+        } 
+      },
+      _count: {
+        select: {
+          queues: {
+            where: {
+              createdAt: { gte: startOfToday },
+              status: { in: ['WAITING', 'CALLED', 'IN_PROGRESS'] }
+            }
+          }
+        }
+      }
+    }
+  });
+
+  return departments.map((dept) => {
+    const { _count, ...rest } = dept;
+    return {
+      ...rest,
+      activeQueueCount: _count.queues,
+    };
+  });
 }
 
 export async function getDepartment(id: string) {
