@@ -7,6 +7,7 @@ import { ApiResponse } from "../../utils/api-response";
 import { asyncHandler, getParam } from "../../utils/async-handler";
 import {
   createDepartmentSchema,
+  departmentAvailabilityQuerySchema,
   departmentIdParamSchema,
   updateDepartmentSchema,
 } from "./departments.schema";
@@ -28,6 +29,18 @@ router.get(
   asyncHandler(async (req, res) => {
     const dept = await service.getDepartment(getParam(req, "id"));
     res.json(ApiResponse.success(dept));
+  }),
+);
+
+router.get(
+  "/:id/availability",
+  validate({ params: departmentIdParamSchema, query: departmentAvailabilityQuerySchema }),
+  asyncHandler(async (req, res) => {
+    const availability = await service.getDepartmentAvailabilityForDate(
+      getParam(req, "id"),
+      departmentAvailabilityQuerySchema.parse(req.query),
+    );
+    res.json(ApiResponse.success(availability));
   }),
 );
 

@@ -74,6 +74,7 @@ Auth: `Authorization: Bearer <accessToken>` untuk endpoint yang ditandai 🔒.
 | GET    | `/queues/stats/overview` | 🔒 admin/doctor | Statistik beban per poli per tanggal.                         |
 | GET    | `/queues/:id`            | 🔒              | Tracking status & ETA.                                        |
 | PATCH  | `/queues/:id/status`     | 🔒 admin/doctor | Update status (WAITING → CALLED → IN_PROGRESS → DONE, dsb).   |
+| PATCH  | `/queues/:id/doctor-notes` | 🔒 admin/doctor | Simpan catatan dokter (diagnosis, cara makan obat, saran).  |
 | POST   | `/queues/:id/cancel`     | 🔒              | Batalkan antrian (patient hanya untuk miliknya).              |
 
 Transisi status yang diizinkan (state machine):

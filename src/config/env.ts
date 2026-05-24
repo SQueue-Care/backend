@@ -43,6 +43,10 @@ const envSchema = z.object({
     .positive()
     .default(15 * 60 * 1000),
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(100),
+
+  CONSULTATION_FEE_DEFAULT: z.coerce.number().int().nonnegative().default(50_000),
+  ADMIN_FEE_DEFAULT: z.coerce.number().int().nonnegative().default(10_000),
+  BPJS_COPAY_DEFAULT: z.coerce.number().int().nonnegative().default(0),
 });
 
 const parsed = envSchema.safeParse(process.env);

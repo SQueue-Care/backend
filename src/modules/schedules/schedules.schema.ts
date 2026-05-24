@@ -47,6 +47,7 @@ export const listSchedulesQuerySchema = z.object({
   doctorId: z.string().optional(),
   departmentId: z.string().optional(),
   dayOfWeek: dayEnum.optional(),
+  date: z.coerce.date().optional(),
 });
 
 export type CreateScheduleInput = z.infer<typeof createScheduleSchema>;

@@ -1,6 +1,11 @@
 import { prisma } from "../../config/prisma";
 import { NotFoundError } from "../../utils/errors";
-import type { CreateDepartmentInput, UpdateDepartmentInput } from "./departments.schema";
+import { getDepartmentAvailability } from "../booking/booking-capacity";
+import type {
+  CreateDepartmentInput,
+  DepartmentAvailabilityQuery,
+  UpdateDepartmentInput,
+} from "./departments.schema";
 
 //Perubahan buat ngasih jumlah pasien
 export async function listDepartments() {
@@ -58,4 +63,13 @@ export async function updateDepartment(id: string, data: UpdateDepartmentInput) 
 
 export async function deleteDepartment(id: string) {
   await prisma.department.delete({ where: { id } });
+}
+
+export async function getDepartmentAvailabilityForDate(
+  id: string,
+  query: DepartmentAvailabilityQuery,
+) {
+  const dept = await prisma.department.findUnique({ where: { id } });
+  if (!dept) throw new NotFoundError("Department not found");
+  return getDepartmentAvailability(id, query.date, query.doctorId);
 }

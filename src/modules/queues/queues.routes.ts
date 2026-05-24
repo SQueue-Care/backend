@@ -10,7 +10,9 @@ import {
   createQueueSchema,
   listQueuesQuerySchema,
   queueIdParamSchema,
+  updateDoctorNotesSchema,
   updateQueueStatusSchema,
+  updateVisitStageSchema,
 } from "./queues.schema";
 import * as service from "./queues.service";
 
@@ -86,6 +88,27 @@ router.patch(
   asyncHandler(async (req, res) => {
     if (!req.user) throw new UnauthorizedError();
     const queue = await service.updateQueueStatus(getParam(req, "id"), req.body, req.user);
+    res.json(ApiResponse.success(queue));
+  }),
+);
+
+router.patch(
+  "/:id/doctor-notes",
+  authorize(Role.ADMIN, Role.DOCTOR),
+  validate({ params: queueIdParamSchema, body: updateDoctorNotesSchema }),
+  asyncHandler(async (req, res) => {
+    if (!req.user) throw new UnauthorizedError();
+    const queue = await service.updateDoctorNotes(getParam(req, "id"), req.body, req.user);
+    res.json(ApiResponse.success(queue));
+  }),
+);
+
+router.patch(
+  "/:id/visit-stage",
+  validate({ params: queueIdParamSchema, body: updateVisitStageSchema }),
+  asyncHandler(async (req, res) => {
+    if (!req.user) throw new UnauthorizedError();
+    const queue = await service.updateVisitStage(getParam(req, "id"), req.body, req.user);
     res.json(ApiResponse.success(queue));
   }),
 );

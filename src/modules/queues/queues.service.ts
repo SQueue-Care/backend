@@ -1,42 +1,118 @@
-import { QueueStatus, Role, type Prisma } from "@prisma/client";
+import { QueueStatus, Role, VisitStage, type Prisma } from "@prisma/client";
 import { prisma } from "../../config/prisma";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../utils/errors";
+import {
+  assertNoActiveQueueDuplicate,
+  nextQueueNumberInTransaction,
+  releaseBookingCapacity,
+  reserveBookingCapacity,
+  reserveDepartmentQuota,
+  toBookingDate,
+  withSerializableTransaction,
+} from "../booking/booking-capacity";
+import { hasConflictingActivePatient, isActiveServingStatus } from "./doctor-serving";
+import { createBillForQueue } from "../bills/bills.service";
 import { estimateWaitTime } from "../predictions/predictions.service";
-import type { CreateQueueInput, ListQueuesQuery, UpdateQueueStatusInput } from "./queues.schema";
+import {
+  notifyQueueStatusChange,
+  notifyVisitStageChange,
+} from "../notifications/notifications.service";
+import {
+  buildVisitFlow,
+  resolvePharmacyRequired,
+  type VisitFlowPayload,
+} from "./visit-flow";
+import type {
+  CreateQueueInput,
+  ListQueuesQuery,
+  UpdateDoctorNotesInput,
+  UpdateQueueStatusInput,
+  UpdateVisitStageInput,
+} from "./queues.schema";
 
-const QUEUE_INCLUDE = {
-  patient: { include: { user: { select: { id: true, name: true, email: true } } } },
+export const QUEUE_INCLUDE = {
+  patient: {
+    include: {
+      user: { select: { id: true, name: true, email: true } },
+    },
+  },
   doctor: { include: { user: { select: { id: true, name: true } } } },
   department: true,
   prediction: true,
+  bill: { select: { id: true, status: true, paymentType: true, patientShare: true } },
 } satisfies Prisma.QueueInclude;
 
-function startOfDay(dateInput?: Date | string): Date {
-  let wibDateString: string;
+type QueueRecord = Prisma.QueueGetPayload<{ include: typeof QUEUE_INCLUDE }>;
 
-  if (dateInput) {
-    // Jika ada payload waktu (dari booking frontend)
-    const d = new Date(dateInput);
-    wibDateString = d.toISOString().split('T')[0];
-  } else {
-    // Jika pembuatan langsung (real-time tanpa payload), paksa hitung dengan zona WIB (UTC+7)
-    const now = new Date();
-    const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
-    const wibTime = new Date(utc + (3600000 * 7));
-    wibDateString = wibTime.toISOString().split('T')[0];
+type QueueWithDoctorFields = {
+  doctorDiagnosis?: string | null;
+  doctorMedicationInstructions?: string | null;
+  doctorAdvice?: string | null;
+};
+
+export type SerializedDoctorNotes = {
+  diagnosis: string | null;
+  medicationInstructions: string | null;
+  advice: string | null;
+} | null;
+
+export type SerializedQueue = Omit<
+  QueueRecord,
+  "doctorDiagnosis" | "doctorMedicationInstructions" | "doctorAdvice"
+> & {
+  doctorNotes: SerializedDoctorNotes;
+  currentServingNumber?: number | null;
+  visitFlow: VisitFlowPayload;
+  nextDestination: VisitFlowPayload["nextDestination"];
+};
+
+function serializeDoctorNotes(queue: QueueWithDoctorFields): SerializedDoctorNotes {
+  const { doctorDiagnosis, doctorMedicationInstructions, doctorAdvice } = queue;
+  if (!doctorDiagnosis && !doctorMedicationInstructions && !doctorAdvice) {
+    return null;
   }
-
-  // Trik 12 Siang Mutlak: Kunci di jam 12 UTC agar Prisma menyimpan tanggal tanpa risiko pergeseran zona waktu
-  return new Date(`${wibDateString}T12:00:00.000Z`);
+  return {
+    diagnosis: doctorDiagnosis ?? null,
+    medicationInstructions: doctorMedicationInstructions ?? null,
+    advice: doctorAdvice ?? null,
+  };
 }
 
-async function nextQueueNumber(departmentId: string, date: Date): Promise<number> {
-  const last = await prisma.queue.findFirst({
-    where: { departmentId, queueDate: date },
-    orderBy: { queueNumber: "desc" },
-    select: { queueNumber: true },
-  });
-  return (last?.queueNumber ?? 0) + 1;
+export function serializeQueue<T extends QueueRecord>(
+  queue: T,
+  extra?: { currentServingNumber?: number | null },
+): Omit<T, "doctorDiagnosis" | "doctorMedicationInstructions" | "doctorAdvice"> & {
+  doctorNotes: SerializedDoctorNotes;
+  currentServingNumber?: number | null;
+  visitFlow: VisitFlowPayload;
+  nextDestination: VisitFlowPayload["nextDestination"];
+} {
+  const {
+    doctorDiagnosis: _d,
+    doctorMedicationInstructions: _m,
+    doctorAdvice: _a,
+    ...rest
+  } = queue;
+  const visitFlow = buildVisitFlow(queue, queue.department);
+  return {
+    ...rest,
+    doctorNotes: serializeDoctorNotes(queue),
+    visitFlow,
+    nextDestination: visitFlow.nextDestination,
+    ...extra,
+  };
+}
+
+function startOfDay(dateInput?: Date | string): Date {
+  if (dateInput) {
+    return toBookingDate(dateInput);
+  }
+
+  const now = new Date();
+  const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+  const wibTime = new Date(utc + 3600000 * 7);
+  const wibDateString = wibTime.toISOString().split("T")[0] ?? "";
+  return new Date(`${wibDateString}T12:00:00.000Z`);
 }
 
 export async function createQueue(input: CreateQueueInput, actor: Express.UserPayload) {
@@ -60,60 +136,62 @@ export async function createQueue(input: CreateQueueInput, actor: Express.UserPa
 
   const targetDate = startOfDay(input.date);
 
-  const duplicate = await prisma.queue.findFirst({
-    where: {
-      patientId,
-      departmentId: input.departmentId,
-      queueDate: targetDate,
-      status: { in: [QueueStatus.WAITING, QueueStatus.CALLED, QueueStatus.IN_PROGRESS] },
-    },
-  });
-  if (duplicate) {
-    throw new BadRequestError("Pasien sudah memiliki antrian aktif di poli ini hari ini");
-  }
-
-  const queueNumber = await nextQueueNumber(input.departmentId, targetDate);
-
   const estimate = await estimateWaitTime({
     departmentId: input.departmentId,
     doctorId: input.doctorId,
     scheduleId: input.scheduleId,
   });
 
-  const queue = await prisma.queue.create({
-    data: {
+  const queue = await withSerializableTransaction(async (tx) => {
+    await assertNoActiveQueueDuplicate(tx, {
       patientId,
       departmentId: input.departmentId,
-      doctorId: input.doctorId,
-      scheduleId: input.scheduleId,
-      queueNumber,
-      queueDate: targetDate,
-      estimatedWaitMinutes: estimate.estimatedMinutes,
-      notes: input.notes,
-      prediction: {
-        create: {
-          estimatedMin: estimate.estimatedMinutes,
-          source: estimate.source,
-          modelVersion: estimate.modelVersion,
-          features: {
-            waitingAhead: estimate.waitingAhead,
-            avgServiceMinutes: estimate.avgServiceMinutes,
+      bookingDate: targetDate,
+    });
+
+    if (input.scheduleId) {
+      await reserveBookingCapacity(tx, {
+        scheduleId: input.scheduleId,
+        departmentId: input.departmentId,
+        bookingDate: targetDate,
+      });
+    } else {
+      await reserveDepartmentQuota(tx, {
+        departmentId: input.departmentId,
+        bookingDate: targetDate,
+      });
+    }
+
+    const queueNumber = await nextQueueNumberInTransaction(tx, input.departmentId, targetDate);
+
+    return tx.queue.create({
+      data: {
+        patientId,
+        departmentId: input.departmentId,
+        doctorId: input.doctorId,
+        scheduleId: input.scheduleId,
+        queueNumber,
+        queueDate: targetDate,
+        estimatedWaitMinutes: estimate.estimatedMinutes,
+        notes: input.notes,
+        currentVisitStage: VisitStage.WAITING,
+        prediction: {
+          create: {
+            estimatedMin: estimate.estimatedMinutes,
+            source: estimate.source,
+            modelVersion: estimate.modelVersion,
+            features: {
+              waitingAhead: estimate.waitingAhead,
+              avgServiceMinutes: estimate.avgServiceMinutes,
+            },
           },
         },
       },
-    },
-    include: QUEUE_INCLUDE,
+      include: QUEUE_INCLUDE,
+    });
   });
 
-  // Decrement schedule capacity
-  if (input.scheduleId) {
-    await prisma.schedule.update({
-      where: { id: input.scheduleId },
-      data: { capacity: { decrement: 1 } }
-    });
-  }
-
-  return queue;
+  return serializeQueue(queue);
 }
 
 // Perubahan daftar pasien yang sedang berlangsung 
@@ -147,10 +225,7 @@ export async function getQueue(id: string) {
     currentServingNumber = lastDone?.queueNumber || null;
   }
 
-  return {
-    ...queue,
-    currentServingNumber
-  };
+  return serializeQueue(queue, { currentServingNumber });
 }
 
 export async function listQueues(filters: ListQueuesQuery) {
@@ -161,11 +236,12 @@ export async function listQueues(filters: ListQueuesQuery) {
     status: filters.status,
     queueDate: filters.date ? startOfDay(filters.date) : undefined,
   };
-  return prisma.queue.findMany({
+  const items = await prisma.queue.findMany({
     where,
     orderBy: [{ queueDate: "desc" }, { queueNumber: "asc" }],
     include: QUEUE_INCLUDE,
   });
+  return items.map((q) => serializeQueue(q));
 }
 
 const VALID_TRANSITIONS: Record<QueueStatus, QueueStatus[]> = {
@@ -185,7 +261,7 @@ const VALID_TRANSITIONS: Record<QueueStatus, QueueStatus[]> = {
 export async function updateQueueStatus(
   id: string,
   input: UpdateQueueStatusInput,
-  _actor: Express.UserPayload,
+  actor: Express.UserPayload,
 ) {
   const queue = await prisma.queue.findUnique({ where: { id } });
   if (!queue) throw new NotFoundError("Queue not found");
@@ -203,10 +279,47 @@ export async function updateQueueStatus(
     notes: input.notes ?? queue.notes,
   };
 
-  if (input.status === QueueStatus.CALLED) data.calledAt = now;
-  if (input.status === QueueStatus.IN_PROGRESS) data.startedAt = now;
+  if (isActiveServingStatus(input.status) && actor.role === Role.DOCTOR) {
+    const doctor = await prisma.doctor.findUnique({ where: { userId: actor.id } });
+    if (!doctor) throw new ForbiddenError("Profil dokter tidak ditemukan");
+
+    if (queue.departmentId !== doctor.departmentId) {
+      throw new ForbiddenError("Antrian ini bukan di poli Anda");
+    }
+
+    const targetDate = startOfDay(queue.queueDate);
+    const doctorActiveQueues = await prisma.queue.findMany({
+      where: {
+        doctorId: doctor.id,
+        queueDate: targetDate,
+        status: { in: [QueueStatus.CALLED, QueueStatus.IN_PROGRESS] },
+      },
+      select: { id: true, status: true },
+    });
+
+    if (hasConflictingActivePatient(doctorActiveQueues, id)) {
+      throw new BadRequestError("Selesaikan pasien saat ini terlebih dahulu");
+    }
+
+    data.doctor = { connect: { id: doctor.id } };
+  }
+
+  if (input.status === QueueStatus.CALLED) {
+    data.calledAt = now;
+    data.currentVisitStage = VisitStage.EXAMINATION;
+  }
+  if (input.status === QueueStatus.IN_PROGRESS) {
+    data.startedAt = now;
+    data.currentVisitStage = VisitStage.EXAMINATION;
+  }
   if (input.status === QueueStatus.DONE) {
     data.finishedAt = now;
+    data.currentVisitStage = VisitStage.ADMIN;
+    data.pharmacyRequired = resolvePharmacyRequired({
+      ...queue,
+      doctorMedicationInstructions:
+        queue.doctorMedicationInstructions ?? null,
+    });
     if (queue.startedAt) {
       data.actualWaitMinutes = Math.max(
         0,
@@ -214,19 +327,134 @@ export async function updateQueueStatus(
       );
     }
   }
-  if (input.status === QueueStatus.CANCELLED) data.cancelledAt = now;
+  if (input.status === QueueStatus.CANCELLED) {
+    data.cancelledAt = now;
+  }
+  if (input.status === QueueStatus.SKIPPED) {
+    data.currentVisitStage = VisitStage.WAITING;
+  }
 
   const updated = await prisma.queue.update({ where: { id }, data, include: QUEUE_INCLUDE });
 
-  // Increment schedule capacity when queue status changes to CANCELLED
-  if (input.status === QueueStatus.CANCELLED && queue.status !== QueueStatus.CANCELLED && queue.scheduleId) {
-    await prisma.schedule.update({
-      where: { id: queue.scheduleId },
-      data: { capacity: { increment: 1 } }
+  if (input.status === QueueStatus.DONE) {
+    try {
+      await createBillForQueue(id);
+    } catch (err) {
+      console.error("[billing] Gagal membuat tagihan otomatis:", err);
+    }
+  }
+
+  if (input.status === QueueStatus.CANCELLED && queue.status !== QueueStatus.CANCELLED) {
+    await withSerializableTransaction(async (tx) => {
+      await releaseBookingCapacity(tx, {
+        scheduleId: queue.scheduleId,
+        departmentId: queue.departmentId,
+        bookingDate: queue.queueDate,
+      });
     });
   }
 
-  return updated;
+  try {
+    await notifyQueueStatusChange(updated, queue.status);
+  } catch (err) {
+    console.error("[notifications] Gagal mengirim notifikasi status antrean:", err);
+  }
+
+  return serializeQueue(updated);
+}
+
+const DOCTOR_NOTES_EDITABLE: QueueStatus[] = [
+  QueueStatus.CALLED,
+  QueueStatus.IN_PROGRESS,
+  QueueStatus.DONE,
+];
+
+export async function updateDoctorNotes(
+  id: string,
+  input: UpdateDoctorNotesInput,
+  actor: Express.UserPayload,
+) {
+  const queue = await prisma.queue.findUnique({ where: { id } });
+  if (!queue) throw new NotFoundError("Queue not found");
+
+  if (actor.role !== Role.DOCTOR && actor.role !== Role.ADMIN) {
+    throw new ForbiddenError("Hanya dokter yang dapat mengisi catatan medis");
+  }
+
+  if (!DOCTOR_NOTES_EDITABLE.includes(queue.status)) {
+    throw new BadRequestError(
+      "Catatan dokter hanya dapat diisi saat pasien dipanggil, diperiksa, atau setelah selesai",
+    );
+  }
+
+  if (actor.role === Role.DOCTOR) {
+    const doctor = await prisma.doctor.findUnique({ where: { userId: actor.id } });
+    if (!doctor) throw new ForbiddenError("Profil dokter tidak ditemukan");
+    if (queue.departmentId !== doctor.departmentId) {
+      throw new ForbiddenError("Antrian ini bukan di poli Anda");
+    }
+  }
+
+  const updated = await prisma.queue.update({
+    where: { id },
+    data: {
+      doctorDiagnosis: input.diagnosis ?? null,
+      doctorMedicationInstructions: input.medicationInstructions ?? null,
+      doctorAdvice: input.advice ?? null,
+      pharmacyRequired: resolvePharmacyRequired({
+        ...queue,
+        doctorMedicationInstructions: input.medicationInstructions ?? null,
+      }),
+    },
+    include: QUEUE_INCLUDE,
+  });
+
+  return serializeQueue(updated);
+}
+
+export async function updateVisitStage(
+  id: string,
+  input: UpdateVisitStageInput,
+  actor: Express.UserPayload,
+) {
+  const queue = await prisma.queue.findUnique({ where: { id }, include: { patient: true } });
+  if (!queue) throw new NotFoundError("Queue not found");
+
+  if (actor.role === Role.PATIENT) {
+    const ownPatient = await prisma.patient.findUnique({ where: { userId: actor.id } });
+    if (ownPatient?.id !== queue.patientId) {
+      throw new ForbiddenError("Tidak dapat memperbarui kunjungan pasien lain");
+    }
+  }
+
+  const now = new Date();
+  const data: Prisma.QueueUpdateInput = {};
+
+  if (input.action === "ADMIN_ARRIVED") {
+    if (queue.status !== QueueStatus.DONE) {
+      throw new BadRequestError("Tahap administrasi hanya setelah pemeriksaan selesai");
+    }
+    data.adminArrivedAt = now;
+  }
+
+  if (input.action === "PHARMACY_COMPLETE") {
+    if (!resolvePharmacyRequired(queue)) {
+      throw new BadRequestError("Kunjungan ini tidak memerlukan pengambilan obat");
+    }
+    data.pharmacyCompletedAt = now;
+    data.currentVisitStage = VisitStage.COMPLETE;
+    data.visitCompletedAt = now;
+  }
+
+  const updated = await prisma.queue.update({ where: { id }, data, include: QUEUE_INCLUDE });
+
+  try {
+    await notifyVisitStageChange(updated, input.action);
+  } catch (err) {
+    console.error("[notifications] Gagal mengirim notifikasi tahap kunjungan:", err);
+  }
+
+  return serializeQueue(updated);
 }
 
 export async function cancelQueue(id: string, actor: Express.UserPayload) {
@@ -244,21 +472,28 @@ export async function cancelQueue(id: string, actor: Express.UserPayload) {
     throw new BadRequestError("Antrian sudah tidak aktif");
   }
 
+  const previousStatus = queue.status;
   const updated = await prisma.queue.update({
     where: { id },
     data: { status: QueueStatus.CANCELLED, cancelledAt: new Date() },
     include: QUEUE_INCLUDE,
   });
 
-  // Increment schedule capacity when queue is cancelled
-  if (queue.scheduleId) {
-    await prisma.schedule.update({
-      where: { id: queue.scheduleId },
-      data: { capacity: { increment: 1 } }
+  await withSerializableTransaction(async (tx) => {
+    await releaseBookingCapacity(tx, {
+      scheduleId: queue.scheduleId,
+      departmentId: queue.departmentId,
+      bookingDate: queue.queueDate,
     });
+  });
+
+  try {
+    await notifyQueueStatusChange(updated, previousStatus);
+  } catch (err) {
+    console.error("[notifications] Gagal mengirim notifikasi pembatalan antrean:", err);
   }
 
-  return updated;
+  return serializeQueue(updated);
 }
 
 export async function overviewStats(date?: Date) {
@@ -319,9 +554,9 @@ export async function rangeStats(days: number = 7) {
   const result: Map<string, { date: string; departments: Array<{ departmentId: string; code: string; name: string; total: number }> }> = new Map();
 
   for (const row of byDateDept) {
-    const dateKey = row.queueDate.toISOString().split('T')[0];
+    const dateKey = row.queueDate.toISOString().split("T")[0] ?? "";
     const dept = deptIndex.get(row.departmentId);
-    if (!dept) continue;
+    if (!dept || !dateKey) continue;
 
     if (!result.has(dateKey)) {
       result.set(dateKey, { date: dateKey, departments: [] });
@@ -376,9 +611,9 @@ export async function analyticsStats(fromDate: Date, toDate: Date) {
   const byDept: Map<string, { total: number; done: number; cancelled: number; waitSum: number; waitCount: number }> = new Map();
 
   for (const row of byDateDept) {
-    const dateKey = row.queueDate.toISOString().split('T')[0];
+    const dateKey = row.queueDate.toISOString().split("T")[0] ?? "";
     const dept = deptIndex.get(row.departmentId);
-    if (!dept) continue;
+    if (!dept || !dateKey) continue;
 
     totalQueues += row._count._all;
 

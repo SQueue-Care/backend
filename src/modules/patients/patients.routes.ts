@@ -5,9 +5,10 @@ import { authorize } from "../../middleware/authorize.middleware";
 import { validate } from "../../middleware/validate.middleware";
 import { ApiResponse } from "../../utils/api-response";
 import { asyncHandler, getParam } from "../../utils/async-handler";
-import { paginationQuerySchema } from "../../utils/pagination";
-import { createPatientSchema, patientIdParamSchema, updatePatientSchema } from "./patients.schema";
+import { UnauthorizedError } from "../../utils/errors";
+import { createPatientSchema, listPatientsQuerySchema, patientIdParamSchema, updatePatientSchema } from "./patients.schema";
 import * as service from "./patients.service";
+import * as billsService from "../bills/bills.service";
 
 const router: Router = Router();
 
@@ -16,9 +17,9 @@ router.use(authenticate);
 router.get(
   "/",
   authorize(Role.ADMIN, Role.DOCTOR),
-  validate({ query: paginationQuerySchema }),
+  validate({ query: listPatientsQuerySchema }),
   asyncHandler(async (req, res) => {
-    const query = paginationQuerySchema.parse(req.query);
+    const query = listPatientsQuerySchema.parse(req.query);
     const { items, pagination } = await service.listPatients(query);
     res.json(ApiResponse.paginated(items, pagination));
   }),
@@ -31,6 +32,17 @@ router.post(
   asyncHandler(async (req, res) => {
     const patient = await service.createPatient(req.body);
     res.status(201).json(ApiResponse.success(patient));
+  }),
+);
+
+router.get(
+  "/:id/medical-profile",
+  authorize(Role.DOCTOR, Role.ADMIN),
+  validate({ params: patientIdParamSchema }),
+  asyncHandler(async (req, res) => {
+    if (!req.user) throw new UnauthorizedError();
+    const profile = await service.getPatientMedicalProfile(getParam(req, "id"), req.user);
+    res.json(ApiResponse.success(profile));
   }),
 );
 
@@ -78,6 +90,16 @@ router.get(
   asyncHandler(async (req, res) => {
     const appointments = await service.getPatientAppointments(getParam(req, "id"));
     res.json(ApiResponse.success(appointments));
+  }),
+);
+
+router.get(
+  "/:id/bills",
+  validate({ params: patientIdParamSchema }),
+  asyncHandler(async (req, res) => {
+    if (!req.user) throw new UnauthorizedError();
+    const bills = await billsService.listPatientBills(getParam(req, "id"), req.user);
+    res.json(ApiResponse.success(bills));
   }),
 );
 

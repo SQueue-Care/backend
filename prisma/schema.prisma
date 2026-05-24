@@ -42,6 +42,28 @@ enum AppointmentStatus {
   NO_SHOW
 }
 
+enum PaymentType {
+  BPJS
+  UMUM
+  ASURANSI_SWASTA
+}
+
+enum BillStatus {
+  PENDING
+  PAID
+  WAIVED
+  BPJS_PENDING
+}
+
+enum VisitStage {
+  REGISTRATION
+  WAITING
+  EXAMINATION
+  ADMIN
+  PHARMACY
+  COMPLETE
+}
+
 enum DayOfWeek {
   MONDAY
   TUESDAY
@@ -50,6 +72,32 @@ enum DayOfWeek {
   FRIDAY
   SATURDAY
   SUNDAY
+}
+
+enum NotificationType {
+  GLOBAL
+  QUEUE_STATUS
+  BILLING
+  SYSTEM
+}
+
+enum AnnouncementPriority {
+  LOW
+  NORMAL
+  HIGH
+}
+
+enum AnnouncementCategory {
+  INFO
+  WARNING
+  SERVICE
+}
+
+enum TargetRole {
+  ALL
+  PATIENT
+  DOCTOR
+  ADMIN
 }
 
 // ---------- Auth / Users ----------
@@ -67,6 +115,7 @@ model User {
   patient       Patient?
   doctor        Doctor?
   refreshTokens RefreshToken[]
+  notifications Notification[]
 
   @@index([role])
 }
@@ -95,6 +144,8 @@ model Patient {
   phone      String?
   gender     Gender?
   birthDate  DateTime?
+  bloodType  String?
+  allergies  String?   @db.Text
   address    String?
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
@@ -103,6 +154,7 @@ model Patient {
   queues       Queue[]
   appointments Appointment[]
   cdssResults  CDSSResult[]
+  bills        Bill[]
 }
 
 model Doctor {
@@ -125,17 +177,24 @@ model Doctor {
 }
 
 model Department {
-  id          String   @id @default(cuid())
-  code        String   @unique
-  name        String
-  description String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id                String   @id @default(cuid())
+  code              String   @unique
+  name              String
+  description       String?
+  building          String?  @default("Gedung Utama")
+  waitingRoomName   String?
+  examinationRoom   String?
+  adminCounter      String?
+  pharmacyLocation  String?
+  dailyBookingQuota Int      @default(200) // maks. booking (antrian + reservasi) per hari per poli
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 
-  doctors      Doctor[]
-  schedules    Schedule[]
-  queues       Queue[]
-  appointments Appointment[]
+  doctors              Doctor[]
+  schedules            Schedule[]
+  queues               Queue[]
+  appointments         Appointment[]
+  departmentDayCaps    DepartmentDayCapacity[]
 }
 
 model Schedule {
@@ -154,9 +213,40 @@ model Schedule {
   department   Department    @relation(fields: [departmentId], references: [id])
   queues       Queue[]
   appointments Appointment[]
+  dayCaps      ScheduleDayCapacity[]
 
   @@index([doctorId, dayOfWeek])
   @@index([departmentId, dayOfWeek])
+}
+
+// Pelacakan kapasitas terpesan per jadwal per tanggal (atomic counter untuk cegah overbooking)
+model ScheduleDayCapacity {
+  id          String   @id @default(cuid())
+  scheduleId  String
+  bookingDate DateTime @db.Date
+  bookedCount Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  schedule Schedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+
+  @@unique([scheduleId, bookingDate])
+  @@index([bookingDate])
+}
+
+// Pelacakan kuota harian per poli (antrian + reservasi)
+model DepartmentDayCapacity {
+  id           String   @id @default(cuid())
+  departmentId String
+  bookingDate  DateTime @db.Date
+  bookedCount  Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+
+  @@unique([departmentId, bookingDate])
+  @@index([bookingDate])
 }
 
 model Queue {
@@ -176,6 +266,14 @@ model Queue {
   estimatedWaitMinutes Int?
   actualWaitMinutes    Int?
   notes                String?
+  doctorDiagnosis              String? @db.Text
+  doctorMedicationInstructions String? @db.Text
+  doctorAdvice                 String? @db.Text
+  currentVisitStage    VisitStage  @default(WAITING)
+  pharmacyRequired     Boolean     @default(false)
+  adminArrivedAt       DateTime?
+  pharmacyCompletedAt  DateTime?
+  visitCompletedAt     DateTime?
   createdAt            DateTime    @default(now())
   updatedAt            DateTime    @updatedAt
 
@@ -184,6 +282,7 @@ model Queue {
   doctor     Doctor?             @relation(fields: [doctorId], references: [id])
   schedule   Schedule?           @relation(fields: [scheduleId], references: [id])
   prediction WaitTimePrediction?
+  bill       Bill?
 
   @@unique([departmentId, queueDate, queueNumber])
   @@index([status])
@@ -252,4 +351,83 @@ model CDSSResult {
   @@index([patientId])
   @@index([doctorId])
   @@index([queueId])
+}
+
+// ---------- Billing ----------
+
+model Bill {
+  id           String      @id @default(cuid())
+  patientId    String
+  queueId      String?     @unique
+  paymentType  PaymentType @default(UMUM)
+  status       BillStatus  @default(PENDING)
+  totalAmount  Int
+  patientShare Int?
+  sepNumber    String?
+  bpjsNumber   String?
+  dueDate      DateTime?
+  paidAt       DateTime?
+  notes        String?     @db.Text
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  patient   Patient        @relation(fields: [patientId], references: [id])
+  queue     Queue?         @relation(fields: [queueId], references: [id])
+  lineItems BillLineItem[]
+
+  @@index([patientId])
+  @@index([status])
+}
+
+model BillLineItem {
+  id          String @id @default(cuid())
+  billId      String
+  description String
+  quantity    Int    @default(1)
+  unitPrice   Int
+  amount      Int
+
+  bill Bill @relation(fields: [billId], references: [id], onDelete: Cascade)
+
+  @@index([billId])
+}
+
+// ---------- Notifications ----------
+
+model Announcement {
+  id         String               @id @default(cuid())
+  title      String
+  body       String               @db.Text
+  priority   AnnouncementPriority @default(NORMAL)
+  category   AnnouncementCategory @default(INFO)
+  targetRole TargetRole           @default(ALL)
+  activeFrom DateTime             @default(now())
+  activeTo   DateTime?
+  isActive   Boolean              @default(true)
+  createdById String?
+  createdAt  DateTime             @default(now())
+  updatedAt  DateTime             @updatedAt
+
+  @@index([isActive, activeFrom])
+  @@index([targetRole])
+}
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String?
+  role      TargetRole?
+  type      NotificationType
+  title     String
+  message   String           @db.Text
+  link      String?
+  readAt    DateTime?
+  metadata  Json?
+  createdAt DateTime         @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userId, readAt])
+  @@index([role])
+  @@index([createdAt])
 }

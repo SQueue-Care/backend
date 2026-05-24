@@ -24,6 +24,16 @@ export const updateQueueStatusSchema = z.object({
   notes: z.string().max(500).optional(),
 });
 
+export const updateDoctorNotesSchema = z.object({
+  diagnosis: z.string().max(2000).optional().nullable(),
+  medicationInstructions: z.string().max(2000).optional().nullable(),
+  advice: z.string().max(2000).optional().nullable(),
+});
+
+export const updateVisitStageSchema = z.object({
+  action: z.enum(["ADMIN_ARRIVED", "PHARMACY_COMPLETE"]),
+});
+
 export const listQueuesQuerySchema = z.object({
   departmentId: z.string().optional(),
   doctorId: z.string().optional(),
@@ -43,4 +53,6 @@ export const listQueuesQuerySchema = z.object({
 
 export type CreateQueueInput = z.infer<typeof createQueueSchema>;
 export type UpdateQueueStatusInput = z.infer<typeof updateQueueStatusSchema>;
+export type UpdateDoctorNotesInput = z.infer<typeof updateDoctorNotesSchema>;
+export type UpdateVisitStageInput = z.infer<typeof updateVisitStageSchema>;
 export type ListQueuesQuery = z.infer<typeof listQueuesQuerySchema>;

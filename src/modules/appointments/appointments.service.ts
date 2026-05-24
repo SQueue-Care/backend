@@ -1,5 +1,13 @@
-import { Role, QueueStatus, AppointmentStatus } from "@prisma/client";import { prisma } from "../../config/prisma";
+import { Role, QueueStatus, AppointmentStatus } from "@prisma/client";
+import { prisma } from "../../config/prisma";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../utils/errors";
+import {
+  releaseBookingCapacity,
+  reserveBookingCapacity,
+  reserveDepartmentQuota,
+  toBookingDate,
+  withSerializableTransaction,
+} from "../booking/booking-capacity";
 import type { CreateAppointmentInput, UpdateAppointmentInput } from "./appointments.schema";
 
 const INCLUDE = {
@@ -41,54 +49,51 @@ export async function createAppointment(input: CreateAppointmentInput, actor: Ex
     }
   }
 
-  // Check and decrement schedule capacity
-  if (input.scheduleId) {
-    const schedule = await prisma.schedule.findUnique({
-      where: { id: input.scheduleId }
-    });
+  const bookingDate = toBookingDate(input.scheduledAt);
 
-    if (!schedule) throw new NotFoundError("Schedule tidak ditemukan");
-
-    if (schedule.capacity <= 0) {
-      throw new BadRequestError("Kapasitas jadwal sudah penuh");
+  return withSerializableTransaction(async (tx) => {
+    if (input.scheduleId) {
+      await reserveBookingCapacity(tx, {
+        scheduleId: input.scheduleId,
+        departmentId: input.departmentId,
+        bookingDate,
+      });
+    } else {
+      await reserveDepartmentQuota(tx, {
+        departmentId: input.departmentId,
+        bookingDate,
+      });
     }
-  }
 
-  const appointment = await prisma.appointment.create({
-    data: {
-      patientId,
-      doctorId: input.doctorId,
-      departmentId: input.departmentId,
-      scheduleId: input.scheduleId,
-      scheduledAt: input.scheduledAt,
-      notes: input.notes,
-    },
-    include: INCLUDE,
-  });
-
-  // Decrement schedule capacity
-  if (input.scheduleId) {
-    await prisma.schedule.update({
-      where: { id: input.scheduleId },
-      data: { capacity: { decrement: 1 } }
+    return tx.appointment.create({
+      data: {
+        patientId,
+        doctorId: input.doctorId,
+        departmentId: input.departmentId,
+        scheduleId: input.scheduleId,
+        scheduledAt: input.scheduledAt,
+        notes: input.notes,
+      },
+      include: INCLUDE,
     });
-  }
-
-  return appointment;
+  });
 }
 
 export async function updateAppointment(id: string, data: UpdateAppointmentInput) {
   const appointment = await prisma.appointment.findUnique({
-    where: { id }
+    where: { id },
   });
 
   if (!appointment) throw new NotFoundError("Appointment tidak ditemukan");
 
-  // If status changed to CANCELLED, increment capacity
-  if (data.status === "CANCELLED" && appointment.status !== "CANCELLED" && appointment.scheduleId) {
-    await prisma.schedule.update({
-      where: { id: appointment.scheduleId },
-      data: { capacity: { increment: 1 } }
+  if (data.status === "CANCELLED" && appointment.status !== "CANCELLED") {
+    return withSerializableTransaction(async (tx) => {
+      await releaseBookingCapacity(tx, {
+        scheduleId: appointment.scheduleId,
+        departmentId: appointment.departmentId,
+        bookingDate: toBookingDate(appointment.scheduledAt),
+      });
+      return tx.appointment.update({ where: { id }, data, include: INCLUDE });
     });
   }
 
@@ -97,22 +102,22 @@ export async function updateAppointment(id: string, data: UpdateAppointmentInput
 
 export async function deleteAppointment(id: string) {
   const appointment = await prisma.appointment.findUnique({
-    where: { id }
+    where: { id },
   });
 
   if (!appointment) throw new NotFoundError("Appointment tidak ditemukan");
 
-  // Increment capacity when deleting appointment
-  if (appointment.scheduleId) {
-    await prisma.schedule.update({
-      where: { id: appointment.scheduleId },
-      data: { capacity: { increment: 1 } }
-    });
-  }
-
-  await prisma.appointment.delete({ where: { id } });
+  await withSerializableTransaction(async (tx) => {
+    if (appointment.status !== AppointmentStatus.CANCELLED) {
+      await releaseBookingCapacity(tx, {
+        scheduleId: appointment.scheduleId,
+        departmentId: appointment.departmentId,
+        bookingDate: toBookingDate(appointment.scheduledAt),
+      });
+    }
+    await tx.appointment.delete({ where: { id } });
+  });
 }
-
 
 // FITUR SELF CHECK-IN & AUTO-CANCEL
 export async function checkInAppointment(id: string, actor: Express.UserPayload) {
@@ -133,24 +138,21 @@ export async function checkInAppointment(id: string, actor: Express.UserPayload)
 
   const now = new Date();
   const scheduledTime = new Date(appointment.scheduledAt);
-  const checkInWindowStart = new Date(scheduledTime.getTime() - 30 * 60000); // Sebelum 30 menit dari jadwal 
-  
+  const checkInWindowStart = new Date(scheduledTime.getTime() - 30 * 60000);
+
   if (now < checkInWindowStart) {
     throw new BadRequestError("Waktu check-in belum dibuka. Silakan kembali 30 menit sebelum jadwal sesi Anda.");
   }
 
-  const result = await prisma.$transaction(async (tx) => {
-    const utc = scheduledTime.getTime() + (scheduledTime.getTimezoneOffset() * 60000);
-    const wibTime = new Date(utc + (3600000 * 7));
-    const wibDateString = wibTime.toISOString().split('T')[0];
-    const targetDate = new Date(`${wibDateString}T12:00:00.000Z`);
-
-    const lastQueue = await tx.queue.findFirst({
-      where: { departmentId: appointment.departmentId, queueDate: targetDate },
-      orderBy: { queueNumber: "desc" },
-      select: { queueNumber: true },
-    });
-    const queueNumber = (lastQueue?.queueNumber ?? 0) + 1;
+  const result = await withSerializableTransaction(async (tx) => {
+    const targetDate = toBookingDate(appointment.scheduledAt);
+    const queueNumber = await tx.queue
+      .findFirst({
+        where: { departmentId: appointment.departmentId, queueDate: targetDate },
+        orderBy: { queueNumber: "desc" },
+        select: { queueNumber: true },
+      })
+      .then((last) => (last?.queueNumber ?? 0) + 1);
 
     const newQueue = await tx.queue.create({
       data: {
@@ -158,17 +160,17 @@ export async function checkInAppointment(id: string, actor: Express.UserPayload)
         departmentId: appointment.departmentId,
         doctorId: appointment.doctorId,
         scheduleId: appointment.scheduleId,
-        queueNumber: queueNumber,
+        queueNumber,
         queueDate: targetDate,
         status: QueueStatus.WAITING,
         notes: appointment.notes,
-        estimatedWaitMinutes: 0, 
-      }
+        estimatedWaitMinutes: 0,
+      },
     });
 
     await tx.appointment.update({
       where: { id },
-      data: { status: AppointmentStatus.COMPLETED }
+      data: { status: AppointmentStatus.COMPLETED },
     });
 
     return newQueue;
@@ -184,29 +186,29 @@ export async function sweepExpiredAppointments() {
   const expiredAppointments = await prisma.appointment.findMany({
     where: {
       status: AppointmentStatus.CONFIRMED,
-      scheduledAt: { lt: expirationTime }
+      scheduledAt: { lt: expirationTime },
     },
-    select: { id: true, scheduleId: true }
+    select: { id: true, scheduleId: true, departmentId: true, scheduledAt: true },
   });
 
   let cancelledCount = 0;
 
   for (const apt of expiredAppointments) {
-    await prisma.$transaction(async (tx) => {
+    await withSerializableTransaction(async (tx) => {
       await tx.appointment.update({
         where: { id: apt.id },
-        data: { 
+        data: {
           status: AppointmentStatus.CANCELLED,
-          cancellationReason: "Dibatalkan otomatis oleh sistem: Pasien tidak melakukan check-in selama 24 jam dari jadwal."
-        }
+          cancellationReason:
+            "Dibatalkan otomatis oleh sistem: Pasien tidak melakukan check-in selama 24 jam dari jadwal.",
+        },
       });
 
-      if (apt.scheduleId) {
-        await tx.schedule.update({
-          where: { id: apt.scheduleId },
-          data: { capacity: { increment: 1 } }
-        });
-      }
+      await releaseBookingCapacity(tx, {
+        scheduleId: apt.scheduleId,
+        departmentId: apt.departmentId,
+        bookingDate: toBookingDate(apt.scheduledAt),
+      });
     });
     cancelledCount++;
   }
