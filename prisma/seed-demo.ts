@@ -231,8 +231,8 @@ function billDemoId(queueId: string): string {
 }
 
 async function clearDemoData(prisma: PrismaClient): Promise<void> {
-  const demoDateFrom = parseDateOnly(DEMO_DATE_ISOS[0]);
-  const demoDateTo = parseDateOnly(DEMO_DATE_ISOS[DEMO_DATE_ISOS.length - 1]);
+  const demoDateFrom = parseDateOnly(DEMO_DATE_ISOS[0]!);
+  const demoDateTo = parseDateOnly(DEMO_DATE_ISOS[DEMO_DATE_ISOS.length - 1]!);
 
   await prisma.billLineItem.deleteMany({
     where: { bill: { id: { startsWith: DEMO_BILL_PREFIX } } },
@@ -482,7 +482,7 @@ export async function seedDemoData(prisma: PrismaClient, ctx: DemoSeedContext): 
 
   // Summary stats
   const queueCount = await prisma.queue.count({
-    where: { queueDate: { gte: parseDateOnly(DEMO_DATE_ISOS[0]), lte: parseDateOnly(DEMO_DATE_ISOS[3]) } },
+    where: { queueDate: { gte: parseDateOnly(DEMO_DATE_ISOS[0]!), lte: parseDateOnly(DEMO_DATE_ISOS[3]!) } },
   });
   const apptCount = await prisma.appointment.count({ where: { id: { startsWith: DEMO_APPT_PREFIX } } });
   const billCount = await prisma.bill.count({ where: { id: { startsWith: DEMO_BILL_PREFIX } } });

@@ -5,6 +5,7 @@ import { authorize } from "../../middleware/authorize.middleware";
 import { validate } from "../../middleware/validate.middleware";
 import { ApiResponse } from "../../utils/api-response";
 import { asyncHandler, getParam } from "../../utils/async-handler";
+import { UnauthorizedError } from "../../utils/errors";
 import { recommendSchema } from "./cdss.schema";
 import * as service from "./cdss.service";
 
@@ -35,11 +36,8 @@ router.get(
   authenticate,
   authorize(Role.DOCTOR, Role.ADMIN),
   asyncHandler(async (req, res) => {
-    const doctorId = (req as any).user?.id;
-    if (!doctorId) {
-      return res.status(401).json(ApiResponse.error("Unauthorized"));
-    }
-    const result = await service.findLatestResult(doctorId);
+    if (!req.user) throw new UnauthorizedError();
+    const result = await service.findLatestResult(req.user.id);
     res.json(ApiResponse.success(result ?? null));
   }),
 );
@@ -60,12 +58,9 @@ router.get(
   authenticate,
   authorize(Role.DOCTOR, Role.ADMIN),
   asyncHandler(async (req, res) => {
-    const doctorId = (req as any).user?.id;
-    if (!doctorId) {
-      return res.status(401).json(ApiResponse.error("Unauthorized"));
-    }
+    if (!req.user) throw new UnauthorizedError();
     const limit = parseInt(req.query.limit as string) || 20;
-    const results = await service.listResultsByDoctor(doctorId, limit);
+    const results = await service.listResultsByDoctor(req.user.id, limit);
     res.json(ApiResponse.success(results));
   }),
 );
@@ -85,17 +80,19 @@ router.post(
   authenticate,
   authorize(Role.DOCTOR, Role.ADMIN),
   asyncHandler(async (req, res) => {
+    if (!req.user) throw new UnauthorizedError();
     const { notes, patientId, queueId } = req.body;
-    const doctorId = (req as any).user?.id;
 
     if (!notes || typeof notes !== "string" || notes.trim().length === 0) {
       return res.status(400).json(ApiResponse.error("Notes cannot be empty"));
     }
-    if (!doctorId) {
-      return res.status(401).json(ApiResponse.error("Unauthorized"));
-    }
 
-    const result = await service.analyzeNotes({ notes, patientId, doctorId, queueId });
+    const result = await service.analyzeNotes({
+      notes,
+      patientId,
+      doctorId: req.user.id,
+      queueId,
+    });
     res.json(ApiResponse.success(result));
   }),
 );

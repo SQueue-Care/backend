@@ -459,7 +459,7 @@ export async function createAnnouncement(
 export async function updateAnnouncement(
   id: string,
   input: UpdateAnnouncementInput,
-  actor: Express.UserPayload,
+  _actor: Express.UserPayload,
 ) {
   const existing = await prisma.announcement.findUnique({ where: { id } });
   if (!existing) throw new NotFoundError("Pengumuman tidak ditemukan");

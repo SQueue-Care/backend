@@ -79,7 +79,6 @@ async function mlEstimate(query: WaitTimeQuery): Promise<WaitTimeEstimate | null
     });
 
     const waitingAhead = activeQueues.filter((q) => q.status === QueueStatus.WAITING).length;
-    console.log(`[DEBUG ML] Found ${activeQueues.length} active queues (WAITING=${activeQueues.filter(q => q.status === QueueStatus.WAITING).length}) for dept=${query.departmentId.substring(0, 12)}, doctor=${query.doctorId?.substring(0, 12)}, date=${today.toISOString().split('T')[0]}`);
     const avgService =
       activeQueues.find((q) => q.doctor)?.doctor?.avgServiceMin ??
       (query.doctorId
@@ -92,7 +91,6 @@ async function mlEstimate(query: WaitTimeQuery): Promise<WaitTimeEstimate | null
     url.searchParams.set("waitingAhead", String(waitingAhead));
     url.searchParams.set("avgServiceMinutes", String(avgService));
 
-    console.log(`[ML] Calling ${url.toString()}`);
     const resp = await fetch(url, {
       method: "GET",
       headers: { "content-type": "application/json" },
@@ -105,7 +103,6 @@ async function mlEstimate(query: WaitTimeQuery): Promise<WaitTimeEstimate | null
       waitingAhead?: number;
       avgServiceMinutes?: number;
     };
-    console.log(`[ML] Response:`, body);
     return {
       estimatedMinutes: Math.max(0, Math.round(body.estimatedMinutes)),
       source: "ml",
@@ -114,20 +111,13 @@ async function mlEstimate(query: WaitTimeQuery): Promise<WaitTimeEstimate | null
       avgServiceMinutes: avgService,
     };
   } catch (err) {
-    console.log(`[ML] Error:`, err);
     logger.warn({ err }, "ML service failed, falling back to heuristic");
     return null;
   }
 }
 
 export async function estimateWaitTime(query: WaitTimeQuery): Promise<WaitTimeEstimate> {
-  console.log(`[ESTIMATE] Starting for dept=${query.departmentId}, doctor=${query.doctorId}`);
   const ml = await mlEstimate(query);
-  if (ml) {
-    console.log(`[ESTIMATE] Using ML: ${ml.estimatedMinutes} min`);
-    return ml;
-  }
-  const heuristic = await heuristicEstimate(query);
-  console.log(`[ESTIMATE] Using heuristic: ${heuristic.estimatedMinutes} min`);
-  return heuristic;
+  if (ml) return ml;
+  return heuristicEstimate(query);
 }
