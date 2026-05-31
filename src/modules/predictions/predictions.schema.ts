@@ -10,7 +10,7 @@ export const waitTimeQuerySchema = z.object({
   priority: z.nativeEnum(QueuePriority).optional(),
   patientType: z.nativeEnum(PatientType).optional(),
   arrivalHour: z.number().int().min(0).max(23).optional(),
-  queueDate: z.date().optional(),
+  queueDate: z.coerce.date().optional(),
 });
 
 export type WaitTimeQuery = z.infer<typeof waitTimeQuerySchema>;

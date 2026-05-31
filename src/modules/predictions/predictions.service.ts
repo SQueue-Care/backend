@@ -2,6 +2,7 @@ import { PatientType, QueuePriority, QueueStatus } from "@prisma/client";
 import { env } from "../../config/env";
 import { logger } from "../../config/logger";
 import { prisma } from "../../config/prisma";
+import { parseSessionStartHour, resolveSessionMetaFromSchedule } from "../queues/session-time";
 import { mapDepartmentName } from "./department-name-mapper";
 import type { WaitTimeQuery } from "./predictions.schema";
 
@@ -12,6 +13,9 @@ export interface WaitTimeEstimate {
   kategori?: string;
   waitingAhead: number;
   avgServiceMinutes: number;
+  sessionStartAt?: string;
+  estimatedCallAt?: string;
+  sessionStartTime?: string;
 }
 
 const DEFAULT_AVG_SERVICE_MIN = 10;
@@ -64,7 +68,7 @@ function getWibDateString(date?: Date): string {
  * ETA = waitingAhead × avgServiceMin + inProgressBuffer
  */
 async function heuristicEstimate(query: WaitTimeQuery): Promise<WaitTimeEstimate> {
-  const wibDateString = getWibDateString();
+  const wibDateString = getWibDateString(query.queueDate);
   const today = new Date(`${wibDateString}T12:00:00.000Z`);
 
   const activeQueues = await prisma.queue.findMany({
@@ -96,6 +100,45 @@ async function heuristicEstimate(query: WaitTimeQuery): Promise<WaitTimeEstimate
     source: "heuristic",
     waitingAhead,
     avgServiceMinutes: avgService,
+  };
+}
+
+async function resolveArrivalHour(query: WaitTimeQuery): Promise<number> {
+  if (query.arrivalHour != null) return query.arrivalHour;
+
+  if (query.scheduleId) {
+    const schedule = await prisma.schedule.findUnique({
+      where: { id: query.scheduleId },
+      select: { startTime: true },
+    });
+    if (schedule?.startTime) {
+      return parseSessionStartHour(schedule.startTime);
+    }
+  }
+
+  return new Date().getHours();
+}
+
+async function attachSessionMeta(
+  query: WaitTimeQuery,
+  estimate: Omit<WaitTimeEstimate, "sessionStartAt" | "estimatedCallAt" | "sessionStartTime">,
+): Promise<WaitTimeEstimate> {
+  let startTime: string | null = null;
+  if (query.scheduleId) {
+    const schedule = await prisma.schedule.findUnique({
+      where: { id: query.scheduleId },
+      select: { startTime: true },
+    });
+    startTime = schedule?.startTime ?? null;
+  }
+
+  const queueDate = query.queueDate
+    ? new Date(`${getWibDateString(query.queueDate)}T12:00:00.000Z`)
+    : undefined;
+
+  return {
+    ...estimate,
+    ...resolveSessionMetaFromSchedule(queueDate, startTime, estimate.estimatedMinutes),
   };
 }
 
@@ -152,10 +195,12 @@ async function mlEstimate(query: WaitTimeQuery): Promise<WaitTimeEstimate | null
       }
     }
 
+    const arrivalHour = await resolveArrivalHour(query);
+
     const payload = {
       umur,
       jumlah_antrian: waitingAhead,
-      jam_kedatangan: query.arrivalHour ?? new Date().getHours(),
+      jam_kedatangan: arrivalHour,
       asuransi,
       prioritas: mapPriority(query.priority),
       status_pasien: mapPatientType(query.patientType),
@@ -197,6 +242,7 @@ async function mlEstimate(query: WaitTimeQuery): Promise<WaitTimeEstimate | null
 
 export async function estimateWaitTime(query: WaitTimeQuery): Promise<WaitTimeEstimate> {
   const ml = await mlEstimate(query);
-  if (ml) return ml;
-  return heuristicEstimate(query);
+  if (ml) return attachSessionMeta(query, ml);
+  const heuristic = await heuristicEstimate(query);
+  return attachSessionMeta(query, heuristic);
 }

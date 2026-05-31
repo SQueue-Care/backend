@@ -1,6 +1,14 @@
-import { PatientType, QueuePriority, QueueStatus, Role, VisitStage, type Prisma } from "@prisma/client";
+import {
+  PatientType,
+  QueuePriority,
+  QueueStatus,
+  Role,
+  VisitStage,
+  type Prisma,
+} from "@prisma/client";
 import { prisma } from "../../config/prisma";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../utils/errors";
+import { createBillForQueue } from "../bills/bills.service";
 import {
   assertNoActiveQueueDuplicate,
   nextQueueNumberInTransaction,
@@ -10,18 +18,12 @@ import {
   toBookingDate,
   withSerializableTransaction,
 } from "../booking/booking-capacity";
-import { hasConflictingActivePatient, isActiveServingStatus } from "./doctor-serving";
-import { createBillForQueue } from "../bills/bills.service";
-import { estimateWaitTime } from "../predictions/predictions.service";
 import {
   notifyQueueStatusChange,
   notifyVisitStageChange,
 } from "../notifications/notifications.service";
-import {
-  buildVisitFlow,
-  resolvePharmacyRequired,
-  type VisitFlowPayload,
-} from "./visit-flow";
+import { estimateWaitTime } from "../predictions/predictions.service";
+import { hasConflictingActivePatient, isActiveServingStatus } from "./doctor-serving";
 import type {
   CreateQueueInput,
   ListQueuesQuery,
@@ -29,6 +31,8 @@ import type {
   UpdateQueueStatusInput,
   UpdateVisitStageInput,
 } from "./queues.schema";
+import { parseSessionStartHour, resolveQueueSessionMeta } from "./session-time";
+import { buildVisitFlow, resolvePharmacyRequired, type VisitFlowPayload } from "./visit-flow";
 
 export const QUEUE_INCLUDE = {
   patient: {
@@ -38,6 +42,7 @@ export const QUEUE_INCLUDE = {
   },
   doctor: { include: { user: { select: { id: true, name: true } } } },
   department: true,
+  schedule: { select: { id: true, startTime: true, endTime: true } },
   prediction: true,
   bill: { select: { id: true, status: true, paymentType: true, patientShare: true } },
 } satisfies Prisma.QueueInclude;
@@ -64,6 +69,9 @@ export type SerializedQueue = Omit<
   currentServingNumber?: number | null;
   visitFlow: VisitFlowPayload;
   nextDestination: VisitFlowPayload["nextDestination"];
+  sessionStartAt: string | null;
+  estimatedCallAt: string | null;
+  sessionStartTime: string | null;
 };
 
 function serializeDoctorNotes(queue: QueueWithDoctorFields): SerializedDoctorNotes {
@@ -94,11 +102,13 @@ export function serializeQueue<T extends QueueRecord>(
     ...rest
   } = queue;
   const visitFlow = buildVisitFlow(queue, queue.department);
+  const sessionMeta = resolveQueueSessionMeta(queue);
   return {
     ...rest,
     doctorNotes: serializeDoctorNotes(queue),
     visitFlow,
     nextDestination: visitFlow.nextDestination,
+    ...sessionMeta,
     ...extra,
   };
 }
@@ -136,6 +146,17 @@ export async function createQueue(input: CreateQueueInput, actor: Express.UserPa
 
   const targetDate = startOfDay(input.date);
 
+  let arrivalHour = new Date().getHours();
+  if (input.scheduleId) {
+    const schedule = await prisma.schedule.findUnique({
+      where: { id: input.scheduleId },
+      select: { startTime: true },
+    });
+    if (schedule?.startTime) {
+      arrivalHour = parseSessionStartHour(schedule.startTime);
+    }
+  }
+
   const estimate = await estimateWaitTime({
     departmentId: input.departmentId,
     doctorId: input.doctorId,
@@ -143,7 +164,7 @@ export async function createQueue(input: CreateQueueInput, actor: Express.UserPa
     patientId,
     priority: input.priority ?? QueuePriority.NORMAL,
     patientType: input.patientType ?? PatientType.RAWAT_JALAN,
-    arrivalHour: new Date().getHours(),
+    arrivalHour,
     queueDate: targetDate,
   });
 
@@ -191,6 +212,8 @@ export async function createQueue(input: CreateQueueInput, actor: Express.UserPa
             features: {
               waitingAhead: estimate.waitingAhead,
               avgServiceMinutes: estimate.avgServiceMinutes,
+              sessionStartAt: estimate.sessionStartAt,
+              estimatedCallAt: estimate.estimatedCallAt,
             },
           },
         },
@@ -202,7 +225,7 @@ export async function createQueue(input: CreateQueueInput, actor: Express.UserPa
   return serializeQueue(queue);
 }
 
-// Perubahan daftar pasien yang sedang berlangsung 
+// Perubahan daftar pasien yang sedang berlangsung
 export async function getQueue(id: string) {
   const queue = await prisma.queue.findUnique({ where: { id }, include: QUEUE_INCLUDE });
   if (!queue) throw new NotFoundError("Queue not found");
@@ -212,10 +235,10 @@ export async function getQueue(id: string) {
     where: {
       departmentId: queue.departmentId,
       queueDate: targetDate,
-      status: { in: [QueueStatus.CALLED, QueueStatus.IN_PROGRESS] }
+      status: { in: [QueueStatus.CALLED, QueueStatus.IN_PROGRESS] },
     },
-    orderBy: { queueNumber: 'asc' },
-    select: { queueNumber: true }
+    orderBy: { queueNumber: "asc" },
+    select: { queueNumber: true },
   });
 
   let currentServingNumber = activeServing?.queueNumber || null;
@@ -225,10 +248,10 @@ export async function getQueue(id: string) {
       where: {
         departmentId: queue.departmentId,
         queueDate: targetDate,
-        status: QueueStatus.DONE
+        status: QueueStatus.DONE,
       },
-      orderBy: { queueNumber: 'desc' },
-      select: { queueNumber: true }
+      orderBy: { queueNumber: "desc" },
+      select: { queueNumber: true },
     });
     currentServingNumber = lastDone?.queueNumber || null;
   }
@@ -325,8 +348,7 @@ export async function updateQueueStatus(
     data.currentVisitStage = VisitStage.ADMIN;
     data.pharmacyRequired = resolvePharmacyRequired({
       ...queue,
-      doctorMedicationInstructions:
-        queue.doctorMedicationInstructions ?? null,
+      doctorMedicationInstructions: queue.doctorMedicationInstructions ?? null,
     });
     if (queue.startedAt) {
       data.actualWaitMinutes = Math.max(
@@ -559,7 +581,13 @@ export async function rangeStats(days: number = 7) {
   const departments = await prisma.department.findMany();
   const deptIndex = new Map(departments.map((d) => [d.id, d]));
 
-  const result: Map<string, { date: string; departments: Array<{ departmentId: string; code: string; name: string; total: number }> }> = new Map();
+  const result: Map<
+    string,
+    {
+      date: string;
+      departments: Array<{ departmentId: string; code: string; name: string; total: number }>;
+    }
+  > = new Map();
 
   for (const row of byDateDept) {
     const dateKey = row.queueDate.toISOString().split("T")[0] ?? "";
@@ -587,7 +615,7 @@ export async function rangeStats(days: number = 7) {
   }
 
   const sortedResult = Array.from(result.values()).sort(
-    (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
+    (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime(),
   );
 
   return sortedResult;
@@ -615,8 +643,12 @@ export async function analyticsStats(fromDate: Date, toDate: Date) {
   let totalWaitMinutes = 0;
   let doneCount = 0;
 
-  const byDate: Map<string, { total: number; done: number; cancelled: number; skipped: number }> = new Map();
-  const byDept: Map<string, { total: number; done: number; cancelled: number; waitSum: number; waitCount: number }> = new Map();
+  const byDate: Map<string, { total: number; done: number; cancelled: number; skipped: number }> =
+    new Map();
+  const byDept: Map<
+    string,
+    { total: number; done: number; cancelled: number; waitSum: number; waitCount: number }
+  > = new Map();
 
   for (const row of byDateDept) {
     const dateKey = row.queueDate.toISOString().split("T")[0] ?? "";
@@ -663,8 +695,12 @@ export async function analyticsStats(fromDate: Date, toDate: Date) {
   }
 
   const avgWaitMinutes = doneCount > 0 ? Math.round(totalWaitMinutes / doneCount) : 0;
-  const completionRate = totalQueues > 0 ? Math.round((totalDone / totalQueues) * 100 * 10) / 10 : 0;
-  const cancellationRate = totalQueues > 0 ? Math.round(((totalCancelled + totalSkipped) / totalQueues) * 100 * 10) / 10 : 0;
+  const completionRate =
+    totalQueues > 0 ? Math.round((totalDone / totalQueues) * 100 * 10) / 10 : 0;
+  const cancellationRate =
+    totalQueues > 0
+      ? Math.round(((totalCancelled + totalSkipped) / totalQueues) * 100 * 10) / 10
+      : 0;
 
   const byDateArray = Array.from(byDate.entries())
     .map(([date, data]) => ({ date, ...data }))
@@ -675,8 +711,8 @@ export async function analyticsStats(fromDate: Date, toDate: Date) {
       const dept = deptIndex.get(deptId);
       return {
         departmentId: deptId,
-        name: dept?.name || 'Unknown',
-        code: dept?.code || 'N/A',
+        name: dept?.name || "Unknown",
+        code: dept?.code || "N/A",
         total: data.total,
         done: data.done,
         cancelled: data.cancelled,

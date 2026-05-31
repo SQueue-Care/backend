@@ -1,4 +1,4 @@
-import { Role, QueueStatus, AppointmentStatus } from "@prisma/client";
+import { AppointmentStatus, QueueStatus, Role } from "@prisma/client";
 import { prisma } from "../../config/prisma";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../utils/errors";
 import {
@@ -8,6 +8,9 @@ import {
   toBookingDate,
   withSerializableTransaction,
 } from "../booking/booking-capacity";
+import { estimateWaitTime } from "../predictions/predictions.service";
+import { QUEUE_INCLUDE, serializeQueue } from "../queues/queues.service";
+import { parseSessionStartHour } from "../queues/session-time";
 import type { CreateAppointmentInput, UpdateAppointmentInput } from "./appointments.schema";
 
 const INCLUDE = {
@@ -123,17 +126,22 @@ export async function deleteAppointment(id: string) {
 export async function checkInAppointment(id: string, actor: Express.UserPayload) {
   const appointment = await prisma.appointment.findUnique({ where: { id } });
   if (!appointment) throw new NotFoundError("Reservasi tidak ditemukan");
-  if (!appointment.patientId) throw new BadRequestError("Data pasien tidak valid pada reservasi ini");
+  if (!appointment.patientId)
+    throw new BadRequestError("Data pasien tidak valid pada reservasi ini");
 
   if (actor.role === Role.PATIENT) {
     const ownPatient = await prisma.patient.findUnique({ where: { userId: actor.id } });
     if (ownPatient?.id !== appointment.patientId) {
-      throw new ForbiddenError("Akses ditolak. Anda tidak dapat melakukan check-in untuk reservasi pasien lain");
+      throw new ForbiddenError(
+        "Akses ditolak. Anda tidak dapat melakukan check-in untuk reservasi pasien lain",
+      );
     }
   }
 
   if (appointment.status !== AppointmentStatus.CONFIRMED) {
-    throw new BadRequestError("Hanya reservasi berstatus TERKONFIRMASI (CONFIRMED) yang dapat melakukan check-in");
+    throw new BadRequestError(
+      "Hanya reservasi berstatus TERKONFIRMASI (CONFIRMED) yang dapat melakukan check-in",
+    );
   }
 
   const now = new Date();
@@ -141,11 +149,34 @@ export async function checkInAppointment(id: string, actor: Express.UserPayload)
   const checkInWindowStart = new Date(scheduledTime.getTime() - 30 * 60000);
 
   if (now < checkInWindowStart) {
-    throw new BadRequestError("Waktu check-in belum dibuka. Silakan kembali 30 menit sebelum jadwal sesi Anda.");
+    throw new BadRequestError(
+      "Waktu check-in belum dibuka. Silakan kembali 30 menit sebelum jadwal sesi Anda.",
+    );
   }
 
+  const targetDate = toBookingDate(appointment.scheduledAt);
+
+  let arrivalHour = scheduledTime.getHours();
+  if (appointment.scheduleId) {
+    const schedule = await prisma.schedule.findUnique({
+      where: { id: appointment.scheduleId },
+      select: { startTime: true },
+    });
+    if (schedule?.startTime) {
+      arrivalHour = parseSessionStartHour(schedule.startTime);
+    }
+  }
+
+  const estimate = await estimateWaitTime({
+    departmentId: appointment.departmentId,
+    doctorId: appointment.doctorId,
+    scheduleId: appointment.scheduleId ?? undefined,
+    patientId: appointment.patientId!,
+    queueDate: targetDate,
+    arrivalHour,
+  });
+
   const result = await withSerializableTransaction(async (tx) => {
-    const targetDate = toBookingDate(appointment.scheduledAt);
     const queueNumber = await tx.queue
       .findFirst({
         where: { departmentId: appointment.departmentId, queueDate: targetDate },
@@ -164,7 +195,21 @@ export async function checkInAppointment(id: string, actor: Express.UserPayload)
         queueDate: targetDate,
         status: QueueStatus.WAITING,
         notes: appointment.notes,
-        estimatedWaitMinutes: 0,
+        estimatedWaitMinutes: estimate.estimatedMinutes,
+        prediction: {
+          create: {
+            estimatedMin: estimate.estimatedMinutes,
+            source: estimate.source,
+            modelVersion: estimate.modelVersion,
+            kategori: estimate.kategori,
+            features: {
+              waitingAhead: estimate.waitingAhead,
+              avgServiceMinutes: estimate.avgServiceMinutes,
+              sessionStartAt: estimate.sessionStartAt,
+              estimatedCallAt: estimate.estimatedCallAt,
+            },
+          },
+        },
       },
     });
 
@@ -176,7 +221,13 @@ export async function checkInAppointment(id: string, actor: Express.UserPayload)
     return newQueue;
   });
 
-  return result;
+  const queue = await prisma.queue.findUnique({
+    where: { id: result.id },
+    include: QUEUE_INCLUDE,
+  });
+  if (!queue) throw new NotFoundError("Antrian tidak ditemukan setelah check-in");
+
+  return serializeQueue(queue);
 }
 
 export async function sweepExpiredAppointments() {
