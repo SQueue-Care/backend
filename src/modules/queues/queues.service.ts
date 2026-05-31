@@ -1,4 +1,4 @@
-import { QueueStatus, Role, VisitStage, type Prisma } from "@prisma/client";
+import { PatientType, QueuePriority, QueueStatus, Role, VisitStage, type Prisma } from "@prisma/client";
 import { prisma } from "../../config/prisma";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../utils/errors";
 import {
@@ -140,6 +140,11 @@ export async function createQueue(input: CreateQueueInput, actor: Express.UserPa
     departmentId: input.departmentId,
     doctorId: input.doctorId,
     scheduleId: input.scheduleId,
+    patientId,
+    priority: input.priority ?? QueuePriority.NORMAL,
+    patientType: input.patientType ?? PatientType.RAWAT_JALAN,
+    arrivalHour: new Date().getHours(),
+    queueDate: targetDate,
   });
 
   const queue = await withSerializableTransaction(async (tx) => {
@@ -174,12 +179,15 @@ export async function createQueue(input: CreateQueueInput, actor: Express.UserPa
         queueDate: targetDate,
         estimatedWaitMinutes: estimate.estimatedMinutes,
         notes: input.notes,
+        priority: input.priority ?? QueuePriority.NORMAL,
+        patientType: input.patientType ?? PatientType.RAWAT_JALAN,
         currentVisitStage: VisitStage.WAITING,
         prediction: {
           create: {
             estimatedMin: estimate.estimatedMinutes,
             source: estimate.source,
             modelVersion: estimate.modelVersion,
+            kategori: estimate.kategori,
             features: {
               waitingAhead: estimate.waitingAhead,
               avgServiceMinutes: estimate.avgServiceMinutes,

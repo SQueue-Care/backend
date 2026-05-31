@@ -100,6 +100,20 @@ enum TargetRole {
   ADMIN
 }
 
+enum QueuePriority {
+  DARURAT
+  TINGGI
+  URGENT
+  SEDANG
+  NORMAL
+  RENDAH
+}
+
+enum PatientType {
+  RAWAT_JALAN
+  RAWAT_INAP
+}
+
 // ---------- Auth / Users ----------
 
 model User {
@@ -263,6 +277,8 @@ model Queue {
   startedAt            DateTime?
   finishedAt           DateTime?
   cancelledAt          DateTime?
+  priority             QueuePriority @default(NORMAL)
+  patientType          PatientType   @default(RAWAT_JALAN)
   estimatedWaitMinutes Int?
   actualWaitMinutes    Int?
   notes                String?
@@ -319,6 +335,7 @@ model WaitTimePrediction {
   estimatedMin Int
   source       String // "ml" | "heuristic"
   modelVersion String?
+  kategori     String? // "Cepat" | "Normal" | "Lama" | "Sangat Lama"
   features     Json?
   createdAt    DateTime @default(now())
 

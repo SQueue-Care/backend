@@ -1,4 +1,4 @@
-import { QueueStatus } from "@prisma/client";
+import { PatientType, QueuePriority, QueueStatus } from "@prisma/client";
 import { z } from "zod";
 
 export const queueIdParamSchema = z.object({ id: z.string().min(1) });
@@ -10,6 +10,8 @@ export const createQueueSchema = z.object({
   scheduleId: z.string().optional(),
   notes: z.string().max(500).optional(),
   date: z.coerce.date().optional(),
+  priority: z.nativeEnum(QueuePriority).optional().default(QueuePriority.NORMAL),
+  patientType: z.nativeEnum(PatientType).optional().default(PatientType.RAWAT_JALAN),
 });
 
 export const updateQueueStatusSchema = z.object({
