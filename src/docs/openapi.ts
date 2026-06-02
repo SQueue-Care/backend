@@ -247,11 +247,25 @@ export const openApiSpec = {
       },
       RecommendBody: {
         type: "object",
-        required: ["symptoms"],
         properties: {
-          symptoms: { type: "array", minItems: 1, items: { type: "string", minLength: 1 } },
+          gejala: { type: "string", minLength: 3, description: "Deskripsi gejala (Bahasa Indonesia)" },
+          symptoms: {
+            type: "array",
+            minItems: 1,
+            items: { type: "string", minLength: 1 },
+            description: "Kode gejala dari master data",
+          },
           patientId: { type: "string" },
-          doctorId: { type: "string" },
+          queueId: { type: "string" },
+        },
+      },
+      AnalyzeNotesBody: {
+        type: "object",
+        required: ["notes"],
+        properties: {
+          notes: { type: "string", minLength: 3 },
+          patientId: { type: "string" },
+          queueId: { type: "string" },
         },
       },
     },
@@ -871,6 +885,18 @@ export const openApiSpec = {
         },
       },
     },
+    "/cdss/ai-status": {
+      get: {
+        tags: ["CDSS"],
+        summary: "SmartQueue Gemini CDSS availability",
+        security: [{ bearerAuth: [] }],
+        responses: {
+          "200": successResponse("AI status"),
+          "401": errorResponse("Unauthorized", 401),
+          "403": errorResponse("Forbidden", 403),
+        },
+      },
+    },
     "/cdss/recommend": {
       post: {
         tags: ["CDSS"],
@@ -885,6 +911,25 @@ export const openApiSpec = {
         responses: {
           "200": successResponse("Recommendation result"),
           "403": errorResponse("Forbidden", 403),
+          "503": errorResponse("AI service unavailable", 503),
+        },
+      },
+    },
+    "/cdss/analyze-notes": {
+      post: {
+        tags: ["CDSS"],
+        summary: "Analyze clinical notes with AI",
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": { schema: { $ref: "#/components/schemas/AnalyzeNotesBody" } },
+          },
+        },
+        responses: {
+          "200": successResponse("Analysis result"),
+          "403": errorResponse("Forbidden", 403),
+          "503": errorResponse("AI service unavailable", 503),
         },
       },
     },

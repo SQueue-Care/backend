@@ -54,3 +54,9 @@ export class BadRequestError extends AppError {
     super(message, 400, { code: "BAD_REQUEST", details });
   }
 }
+
+export class ServiceUnavailableError extends AppError {
+  constructor(message = "Service unavailable", details?: unknown) {
+    super(message, 503, { code: "SERVICE_UNAVAILABLE", details });
+  }
+}

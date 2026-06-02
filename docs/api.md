@@ -103,13 +103,22 @@ Transisi status yang diizinkan (state machine):
 
 Fallback heuristik dipakai otomatis ketika `ML_SERVICE_URL` kosong atau ML service error. Respons menyertakan `source: "ml" \| "heuristic"`.
 
-## CDSS (rule-based, MVP)
+## CDSS (SmartQueue Gemini + rule-based fallback)
 
-| Method | Path                       | Auth            | Deskripsi                                                                |
-| ------ | -------------------------- | --------------- | ------------------------------------------------------------------------ |
-| GET    | `/cdss/symptoms`           | 🔒              | Master data gejala.                                                      |
-| POST   | `/cdss/recommend`          | 🔒 doctor/admin | Input `{ symptoms: string[], patientId?, doctorId? }` → top-N diagnosis. |
-| GET    | `/cdss/history/:patientId` | 🔒 doctor/admin | Riwayat rekomendasi CDSS untuk pasien.                                   |
+| Method | Path                       | Auth            | Deskripsi                                                                                    |
+| ------ | -------------------------- | --------------- | -------------------------------------------------------------------------------------------- |
+| GET    | `/cdss/symptoms`           | 🔒              | Master data gejala.                                                                          |
+| GET    | `/cdss/ai-status`          | 🔒 doctor/admin | Status layanan Gemini (`configured`, `available`, `status`, `message`).                      |
+| POST   | `/cdss/recommend`          | 🔒 doctor/admin | Input `{ gejala?, symptoms?, patientId?, queueId? }` — wajib salah satu: `gejala` atau `symptoms`. |
+| POST   | `/cdss/analyze-notes`      | 🔒 doctor/admin | Input `{ notes, patientId?, queueId? }` — analisis catatan klinis (Gemini, fallback LLM).    |
+| GET    | `/cdss/history/:patientId` | 🔒 doctor/admin | Riwayat rekomendasi CDSS untuk pasien.                                                       |
+| GET    | `/cdss/latest`             | 🔒 doctor/admin | Rekomendasi terakhir oleh dokter yang login.                                                 |
+| GET    | `/cdss/by-queue/:queueId`  | 🔒 doctor/admin | Rekomendasi terakhir untuk antrian tertentu.                                                 |
+| GET    | `/cdss/results`            | 🔒 doctor/admin | Riwayat rekomendasi dokter (`?limit=20`).                                                    |
+
+Integrasi AI memakai `SMARTQUEUE_AI_URL` → `POST /cdss/recommend` (FastAPI). Jika gagal dan request memuat `symptoms[]`, sistem fallback ke engine rule-based.
+
+Response `recommend` / `analyze-notes` menyertakan: `source` (`gemini` \| `rule-based` \| `legacy-llm`), `identifiedSymptoms`, `catatanMedis` (Gemini), `candidates`, `disclaimer`.
 
 Catatan: Hasil CDSS adalah **rekomendasi awal**, bukan diagnosis final. Keputusan medis tetap pada dokter.
 
@@ -138,4 +147,5 @@ Catatan: Hasil CDSS adalah **rekomendasi awal**, bukan diagnosis final. Keputusa
 | 409  | `CONFLICT`         | Bentrok data (mis. email unik).   |
 | 409  | `UNIQUE_VIOLATION` | Prisma P2002 — unique constraint. |
 | 429  | `RATE_LIMIT`       | Rate limit tercapai.              |
+| 503  | `SERVICE_UNAVAILABLE` | Layanan AI/CDSS tidak tersedia. |
 | 500  | `INTERNAL_ERROR`   | Error tak terduga.                |

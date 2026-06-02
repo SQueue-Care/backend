@@ -6,7 +6,7 @@ import { validate } from "../../middleware/validate.middleware";
 import { ApiResponse } from "../../utils/api-response";
 import { asyncHandler, getParam } from "../../utils/async-handler";
 import { UnauthorizedError } from "../../utils/errors";
-import { recommendSchema } from "./cdss.schema";
+import { analyzeNotesSchema, recommendSchema } from "./cdss.schema";
 import * as service from "./cdss.service";
 
 const router: Router = Router();
@@ -20,13 +20,27 @@ router.get(
   }),
 );
 
+router.get(
+  "/ai-status",
+  authenticate,
+  authorize(Role.DOCTOR, Role.ADMIN),
+  asyncHandler(async (_req, res) => {
+    const status = await service.getAiStatus();
+    res.json(ApiResponse.success(status));
+  }),
+);
+
 router.post(
   "/recommend",
   authenticate,
   authorize(Role.DOCTOR, Role.ADMIN),
   validate({ body: recommendSchema }),
   asyncHandler(async (req, res) => {
-    const result = await service.recommend(req.body);
+    if (!req.user) throw new UnauthorizedError();
+    const result = await service.recommend({
+      ...req.body,
+      doctorId: req.user.id,
+    });
     res.json(ApiResponse.success(result));
   }),
 );
@@ -79,19 +93,12 @@ router.post(
   "/analyze-notes",
   authenticate,
   authorize(Role.DOCTOR, Role.ADMIN),
+  validate({ body: analyzeNotesSchema }),
   asyncHandler(async (req, res) => {
     if (!req.user) throw new UnauthorizedError();
-    const { notes, patientId, queueId } = req.body;
-
-    if (!notes || typeof notes !== "string" || notes.trim().length === 0) {
-      return res.status(400).json(ApiResponse.error("Notes cannot be empty"));
-    }
-
     const result = await service.analyzeNotes({
-      notes,
-      patientId,
+      ...req.body,
       doctorId: req.user.id,
-      queueId,
     });
     res.json(ApiResponse.success(result));
   }),
