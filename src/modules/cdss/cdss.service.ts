@@ -1,24 +1,17 @@
 import { Prisma } from "@prisma/client";
 import { env } from "../../config/env";
-import { logger } from "../../config/logger";
 import { prisma } from "../../config/prisma";
-import { BadRequestError, ServiceUnavailableError } from "../../utils/errors";
-import { ruleBasedEngine } from "./cdss.engine";
+import { ServiceUnavailableError } from "../../utils/errors";
 import type { AnalyzeNotesInput, RecommendInput } from "./cdss.schema";
 import {
   fetchCdssHealth,
   fetchCdssRecommend,
   isCdssAiAvailable,
   mapGenderToSmartQueue,
-  mapSmartQueueCandidates,
-  type SmartQueueCdssHealth,
 } from "./cdss.smartqueue";
-import type { CDSSCandidate, RecommendResult } from "./cdss.types";
+import type { CdssHealthResponse, CdssKandidatDiagnosis, CdssRecommendResponse } from "./cdss.types";
 
-const GEMINI_ENGINE = "smartqueue-gemini";
-const GEMINI_VERSION = "gemini-2.5-flash";
-const RULE_DISCLAIMER =
-  "Hasil ini adalah rekomendasi awal berbasis aturan dan bukan diagnosis final. Keputusan medis tetap pada dokter.";
+const CDSS_ENGINE = "smartqueue-gemini";
 
 function calculateAge(birthDate: Date): number {
   const today = new Date();
@@ -31,7 +24,9 @@ function calculateAge(birthDate: Date): number {
 }
 
 async function resolvePatientContext(patientId?: string) {
-  if (!patientId) return { umur: undefined as number | undefined, jenisKelamin: undefined as "L" | "P" | undefined };
+  if (!patientId) {
+    return { umur: undefined as number | undefined, jenisKelamin: undefined as "L" | "P" | undefined };
+  }
 
   const patient = await prisma.patient.findUnique({
     where: { id: patientId },
@@ -46,129 +41,184 @@ async function resolvePatientContext(patientId?: string) {
   };
 }
 
-async function resolveSymptomLabels(codes: string[]): Promise<string[]> {
-  const normalized = codes.map((c) => c.trim().toLowerCase());
-  const rows = await prisma.symptom.findMany({
-    where: { code: { in: normalized } },
-    select: { code: true, label: true },
-  });
-  const labelByCode = new Map(rows.map((r) => [r.code, r.label]));
-
-  return codes.map((code) => {
-    const key = code.trim().toLowerCase();
-    return labelByCode.get(key) ?? code;
-  });
-}
-
-async function buildGejalaText(input: RecommendInput | { gejala?: string; symptoms?: string[] }): Promise<string> {
-  if (input.gejala?.trim()) return input.gejala.trim();
-  if (input.symptoms?.length) {
-    const labels = await resolveSymptomLabels(input.symptoms);
-    return labels.join(", ");
-  }
-  throw new BadRequestError("Gejala wajib diisi");
-}
-
 async function persistCdssResult(data: {
   patientId?: string;
   doctorId?: string;
   queueId?: string;
-  notes?: string;
-  symptoms: string[] | Prisma.InputJsonValue;
-  candidates: CDSSCandidate[];
-  engine: string;
+  gejala: string;
+  response: {
+    gejala_teridentifikasi: string[];
+    kandidat_diagnosis: CdssKandidatDiagnosis[];
+    catatan_medis: string;
+    disclaimer: string;
+  };
 }): Promise<string> {
-  const saved = await prisma.cDSSResult.create({
-    data: {
-      patientId: data.patientId ?? null,
-      doctorId: data.doctorId ?? null,
-      queueId: data.queueId ?? null,
-      notes: data.notes ?? null,
-      symptoms: data.symptoms as Prisma.InputJsonValue,
-      candidates: data.candidates as unknown as Prisma.InputJsonValue,
-      engine: data.engine,
-    },
+  const recordData = {
+    patientId: data.patientId ?? null,
+    doctorId: data.doctorId ?? null,
+    queueId: data.queueId ?? null,
+    notes: data.gejala,
+    symptoms: data.response.gejala_teridentifikasi as Prisma.InputJsonValue,
+    candidates: {
+      kandidat_diagnosis: data.response.kandidat_diagnosis,
+      catatan_medis: data.response.catatan_medis,
+      disclaimer: data.response.disclaimer,
+    } as unknown as Prisma.InputJsonValue,
+    engine: CDSS_ENGINE,
+  };
+
+  return prisma.$transaction(async (tx) => {
+    if (data.queueId) {
+      await tx.queue.update({
+        where: { id: data.queueId },
+        data: { notes: data.gejala },
+      });
+
+      const existing = await tx.cDSSResult.findFirst({
+        where: { queueId: data.queueId },
+        orderBy: { createdAt: "desc" },
+      });
+
+      if (existing) {
+        const updated = await tx.cDSSResult.update({
+          where: { id: existing.id },
+          data: recordData,
+        });
+        return updated.id;
+      }
+    }
+
+    const saved = await tx.cDSSResult.create({ data: recordData });
+    return saved.id;
   });
-  return saved.id;
 }
 
-async function recommendViaGemini(
+function toRecommendResponse(
+  id: string,
   gejala: string,
-  context: { patientId?: string; doctorId?: string; queueId?: string; notes?: string },
-): Promise<RecommendResult | null> {
-  const { umur, jenisKelamin } = await resolvePatientContext(context.patientId);
+  ai: {
+    gejala_teridentifikasi: string[];
+    kandidat_diagnosis: CdssKandidatDiagnosis[];
+    catatan_medis: string;
+    disclaimer: string;
+  },
+  extra?: { createdAt?: Date; notes?: string | null; patient?: CdssRecommendResponse["patient"] },
+): CdssRecommendResponse {
+  return {
+    id,
+    gejala,
+    gejala_teridentifikasi: ai.gejala_teridentifikasi,
+    kandidat_diagnosis: ai.kandidat_diagnosis,
+    catatan_medis: ai.catatan_medis,
+    disclaimer: ai.disclaimer,
+    status: "success",
+    notes: extra?.notes ?? gejala,
+    createdAt: extra?.createdAt,
+    patient: extra?.patient,
+  };
+}
+
+function parseStoredCandidates(candidates: Prisma.JsonValue): {
+  kandidat_diagnosis: CdssKandidatDiagnosis[];
+  catatan_medis: string;
+  disclaimer: string;
+} {
+  if (Array.isArray(candidates)) {
+    return {
+      kandidat_diagnosis: candidates as unknown as CdssKandidatDiagnosis[],
+      catatan_medis: "",
+      disclaimer:
+        "Hasil ini merupakan rekomendasi berbasis AI dan BUKAN diagnosis medis. Keputusan klinis tetap sepenuhnya berada di tangan dokter yang menangani.",
+    };
+  }
+
+  if (candidates && typeof candidates === "object") {
+    const obj = candidates as Record<string, unknown>;
+    const kandidat = Array.isArray(obj.kandidat_diagnosis)
+      ? (obj.kandidat_diagnosis as CdssKandidatDiagnosis[])
+      : [];
+    return {
+      kandidat_diagnosis: kandidat,
+      catatan_medis: typeof obj.catatan_medis === "string" ? obj.catatan_medis : "",
+      disclaimer:
+        typeof obj.disclaimer === "string"
+          ? obj.disclaimer
+          : "Hasil ini merupakan rekomendasi berbasis AI dan BUKAN diagnosis medis. Keputusan klinis tetap sepenuhnya berada di tangan dokter yang menangani.",
+    };
+  }
+
+  return {
+    kandidat_diagnosis: [],
+    catatan_medis: "",
+    disclaimer:
+      "Hasil ini merupakan rekomendasi berbasis AI dan BUKAN diagnosis medis. Keputusan klinis tetap sepenuhnya berada di tangan dokter yang menangani.",
+  };
+}
+
+function fromDbRecord(
+  record: {
+    id: string;
+    notes: string | null;
+    symptoms: Prisma.JsonValue;
+    candidates: Prisma.JsonValue;
+    createdAt: Date;
+    patient?: CdssRecommendResponse["patient"] | null;
+  },
+): CdssRecommendResponse {
+  const gejala_teridentifikasi = Array.isArray(record.symptoms)
+    ? (record.symptoms as string[])
+    : [];
+  const stored = parseStoredCandidates(record.candidates);
+
+  return {
+    id: record.id,
+    gejala: record.notes ?? "",
+    gejala_teridentifikasi,
+    kandidat_diagnosis: stored.kandidat_diagnosis,
+    catatan_medis: stored.catatan_medis,
+    disclaimer: stored.disclaimer,
+    status: "success",
+    notes: record.notes,
+    createdAt: record.createdAt,
+    patient: record.patient ?? undefined,
+  };
+}
+
+async function callSmartQueueCdss(
+  gejala: string,
+  context: {
+    patientId?: string;
+    doctorId: string;
+    queueId?: string;
+    umur?: number;
+    jenis_kelamin?: "L" | "P";
+  },
+): Promise<CdssRecommendResponse> {
+  const patientCtx = await resolvePatientContext(context.patientId);
 
   const aiResponse = await fetchCdssRecommend({
     gejala,
-    umur,
-    jenis_kelamin: jenisKelamin,
-  });
-
-  if (!aiResponse) return null;
-
-  const candidates = mapSmartQueueCandidates(aiResponse.kandidat_diagnosis);
-  const id = await persistCdssResult({
-    patientId: context.patientId,
-    doctorId: context.doctorId,
-    queueId: context.queueId,
-    notes: context.notes,
-    symptoms: aiResponse.gejala_teridentifikasi,
-    candidates,
-    engine: GEMINI_ENGINE,
-  });
-
-  return {
-    id,
-    engine: GEMINI_ENGINE,
-    source: "gemini",
-    version: GEMINI_VERSION,
-    disclaimer: aiResponse.disclaimer,
-    identifiedSymptoms: aiResponse.gejala_teridentifikasi,
-    catatanMedis: aiResponse.catatan_medis,
-    candidates,
-  };
-}
-
-async function recommendViaRules(
-  symptoms: string[],
-  context: { patientId?: string; doctorId?: string; queueId?: string },
-): Promise<RecommendResult> {
-  const candidates = await ruleBasedEngine.recommend({
-    symptoms,
-    patientId: context.patientId,
-    doctorId: context.doctorId,
+    umur: context.umur ?? patientCtx.umur,
+    jenis_kelamin: context.jenis_kelamin ?? patientCtx.jenisKelamin,
   });
 
   const id = await persistCdssResult({
     patientId: context.patientId,
     doctorId: context.doctorId,
     queueId: context.queueId,
-    symptoms,
-    candidates,
-    engine: ruleBasedEngine.name,
+    gejala,
+    response: aiResponse,
   });
 
-  return {
-    id,
-    engine: ruleBasedEngine.name,
-    source: "rule-based",
-    version: ruleBasedEngine.version,
-    disclaimer: RULE_DISCLAIMER,
-    candidates,
-  };
+  return toRecommendResponse(id, gejala, aiResponse);
 }
 
-export async function getAiStatus(): Promise<{
-  configured: boolean;
-  available: boolean;
-  status: string;
-  message: string;
-}> {
+/** Selaras SmartQueue GET /cdss/health */
+export async function getCdssHealth(): Promise<CdssHealthResponse> {
   if (!env.SMARTQUEUE_AI_URL) {
     return {
-      configured: false,
-      available: false,
       status: "not_configured",
+      gemini_api_configured: false,
       message: "SMARTQUEUE_AI_URL belum dikonfigurasi",
     };
   }
@@ -176,65 +226,79 @@ export async function getAiStatus(): Promise<{
   const health = await fetchCdssHealth();
   if (!health) {
     return {
-      configured: true,
-      available: false,
       status: "unreachable",
+      gemini_api_configured: false,
       message: "Layanan SmartQueue AI tidak dapat dijangkau",
     };
   }
 
+  return health;
+}
+
+/** Alias untuk kompatibilitas endpoint /cdss/ai-status */
+export async function getAiStatus(): Promise<CdssHealthResponse & { available: boolean }> {
+  const health = await getCdssHealth();
   return {
-    configured: true,
+    ...health,
     available: isCdssAiAvailable(health),
-    status: health.status,
-    message: health.message,
   };
 }
 
 export async function recommend(
   input: RecommendInput & { doctorId: string },
-): Promise<RecommendResult> {
-  const gejala = await buildGejalaText(input);
-  const context = {
+): Promise<CdssRecommendResponse> {
+  if (!isCdssAiAvailable(await getCdssHealth())) {
+    throw new ServiceUnavailableError(
+      "CDSS tidak tersedia. Pastikan SmartQueue AI aktif dan GEMINI_API_KEY terkonfigurasi.",
+    );
+  }
+
+  return callSmartQueueCdss(input.gejala, {
     patientId: input.patientId,
     doctorId: input.doctorId,
     queueId: input.queueId,
-  };
+    umur: input.umur,
+    jenis_kelamin: input.jenis_kelamin,
+  });
+}
 
-  const geminiResult = await recommendViaGemini(gejala, context);
-  if (geminiResult) return geminiResult;
-
-  if (input.symptoms?.length) {
-    logger.info("SmartQueue CDSS unavailable, using rule-based fallback");
-    return recommendViaRules(input.symptoms, context);
-  }
-
-  throw new ServiceUnavailableError(
-    "Layanan rekomendasi AI tidak tersedia. Coba lagi nanti atau gunakan checklist gejala.",
-  );
+export async function analyzeNotes(
+  input: AnalyzeNotesInput & { doctorId: string },
+): Promise<CdssRecommendResponse> {
+  return recommend({
+    gejala: input.notes.trim(),
+    patientId: input.patientId,
+    queueId: input.queueId,
+    doctorId: input.doctorId,
+  });
 }
 
 export async function listSymptoms() {
   return prisma.symptom.findMany({ orderBy: { label: "asc" } });
 }
 
-export async function historyForPatient(patientId: string) {
-  return prisma.cDSSResult.findMany({
+export async function historyForPatient(patientId: string): Promise<CdssRecommendResponse[]> {
+  const rows = await prisma.cDSSResult.findMany({
     where: { patientId },
     orderBy: { createdAt: "desc" },
     take: 20,
   });
+  return rows.map(fromDbRecord);
 }
 
-export async function findLatestResult(doctorId: string) {
-  return prisma.cDSSResult.findFirst({
+export async function findLatestResult(doctorId: string): Promise<CdssRecommendResponse | null> {
+  const row = await prisma.cDSSResult.findFirst({
     where: { doctorId },
     orderBy: { createdAt: "desc" },
   });
+  return row ? fromDbRecord(row) : null;
 }
 
-export async function listResultsByDoctor(doctorId: string, limit = 20) {
-  return prisma.cDSSResult.findMany({
+export async function listResultsByDoctor(
+  doctorId: string,
+  limit = 20,
+): Promise<CdssRecommendResponse[]> {
+  const rows = await prisma.cDSSResult.findMany({
     where: { doctorId },
     orderBy: { createdAt: "desc" },
     take: limit,
@@ -244,117 +308,13 @@ export async function listResultsByDoctor(doctorId: string, limit = 20) {
       },
     },
   });
+  return rows.map(fromDbRecord);
 }
 
-export async function findByQueueId(queueId: string) {
-  return prisma.cDSSResult.findFirst({
+export async function findByQueueId(queueId: string): Promise<CdssRecommendResponse | null> {
+  const row = await prisma.cDSSResult.findFirst({
     where: { queueId },
     orderBy: { createdAt: "desc" },
   });
-}
-
-export async function analyzeNotes(
-  input: AnalyzeNotesInput & { doctorId: string },
-): Promise<RecommendResult> {
-  const geminiResult = await recommendViaGemini(input.notes.trim(), {
-    patientId: input.patientId,
-    doctorId: input.doctorId,
-    queueId: input.queueId,
-    notes: input.notes,
-  });
-
-  if (geminiResult) return geminiResult;
-
-  if (env.LLM_API_BASE_URL) {
-    return analyzeNotesLegacyLlm(input);
-  }
-
-  throw new ServiceUnavailableError(
-    "Layanan analisis catatan AI tidak tersedia. Pastikan SmartQueue AI aktif atau konfigurasi LLM_API_BASE_URL.",
-  );
-}
-
-async function analyzeNotesLegacyLlm(
-  input: AnalyzeNotesInput & { doctorId: string },
-): Promise<RecommendResult> {
-  const apiUrl = env.LLM_API_BASE_URL!;
-  const model = env.LLM_MODEL ?? "default";
-
-  const systemPrompt = `Kamu adalah asisten medis. Analisis catatan klinis pasien dan berikan output HANYA dalam format JSON berikut tanpa teks lain:
-{
-  "symptoms": ["gejala1", "gejala2"],
-  "candidates": [
-    {
-      "diagnosis": "nama diagnosis",
-      "confidence": 0.8,
-      "reasoning": "penjelasan singkat",
-      "urgency": "low",
-      "recommendedDepartment": "UMUM"
-    }
-  ]
-}
-urgency: low | medium | high. Maks 5 kandidat diagnosis.`;
-
-  const resp = await fetch(`${apiUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${env.LLM_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: `Catatan pasien: ${input.notes}` },
-      ],
-      temperature: 0.3,
-      max_tokens: 800,
-    }),
-    signal: AbortSignal.timeout(15000),
-  });
-
-  if (!resp.ok) {
-    throw new ServiceUnavailableError(`Layanan LLM gagal (${resp.status})`);
-  }
-
-  const json = (await resp.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
-
-  let parsed: { symptoms: string[]; candidates: CDSSCandidate[] };
-  try {
-    if (!json.choices?.[0]?.message?.content) {
-      throw new Error("Invalid LLM response format");
-    }
-    parsed = JSON.parse(json.choices[0].message.content);
-  } catch (err) {
-    throw new ServiceUnavailableError(
-      `Gagal memproses respons LLM: ${err instanceof Error ? err.message : "Unknown error"}`,
-    );
-  }
-
-  const candidates = parsed.candidates.map((c) => ({
-    ...c,
-    matchedSymptoms: c.matchedSymptoms ?? [],
-  }));
-
-  const id = await persistCdssResult({
-    patientId: input.patientId,
-    doctorId: input.doctorId,
-    queueId: input.queueId,
-    notes: input.notes,
-    symptoms: parsed.symptoms,
-    candidates,
-    engine: "legacy-llm",
-  });
-
-  return {
-    id,
-    engine: "legacy-llm",
-    source: "legacy-llm",
-    disclaimer:
-      "Hasil ini adalah rekomendasi awal berbasis AI dan bukan diagnosis final. Keputusan medis tetap pada dokter.",
-    identifiedSymptoms: parsed.symptoms,
-    candidates,
-  };
+  return row ? fromDbRecord(row) : null;
 }

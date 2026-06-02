@@ -21,6 +21,16 @@ router.get(
 );
 
 router.get(
+  "/health",
+  authenticate,
+  authorize(Role.DOCTOR, Role.ADMIN),
+  asyncHandler(async (_req, res) => {
+    const status = await service.getCdssHealth();
+    res.json(ApiResponse.success(status));
+  }),
+);
+
+router.get(
   "/ai-status",
   authenticate,
   authorize(Role.DOCTOR, Role.ADMIN),

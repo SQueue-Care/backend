@@ -1,7 +1,8 @@
 import { Gender } from "@prisma/client";
 import { env } from "../../config/env";
 import { logger } from "../../config/logger";
-import type { CDSSCandidate } from "./cdss.types";
+import { ServiceUnavailableError } from "../../utils/errors";
+import type { CdssHealthResponse, CdssKandidatDiagnosis } from "./cdss.types";
 
 const CDSS_TIMEOUT_MS = 30_000;
 
@@ -11,28 +12,15 @@ export interface SmartQueueCdssRequest {
   jenis_kelamin?: "L" | "P";
 }
 
-export interface SmartQueueCdssCandidate {
-  nama_penyakit: string;
-  tingkat_urgensi: string;
-  confidence: number;
-  departemen: string;
-  penjelasan: string;
-  pemeriksaan_lanjutan: string[];
-}
-
 export interface SmartQueueCdssResponse {
   gejala_teridentifikasi: string[];
-  kandidat_diagnosis: SmartQueueCdssCandidate[];
+  kandidat_diagnosis: CdssKandidatDiagnosis[];
   catatan_medis: string;
   disclaimer: string;
   status: string;
 }
 
-export interface SmartQueueCdssHealth {
-  status: "healthy" | "not_configured" | string;
-  gemini_api_configured: boolean;
-  message: string;
-}
+export type SmartQueueCdssHealth = CdssHealthResponse;
 
 export function mapGenderToSmartQueue(gender: Gender | null | undefined): "L" | "P" | undefined {
   if (gender === Gender.MALE) return "L";
@@ -40,31 +28,24 @@ export function mapGenderToSmartQueue(gender: Gender | null | undefined): "L" | 
   return undefined;
 }
 
-export function mapUrgency(level: string): CDSSCandidate["urgency"] {
-  const key = level.trim().toUpperCase();
-  if (key === "HIGH") return "high";
-  if (key === "MEDIUM") return "medium";
-  return "low";
-}
-
-export function mapSmartQueueCandidates(items: SmartQueueCdssCandidate[]): CDSSCandidate[] {
-  return items.map((item) => ({
-    diagnosis: item.nama_penyakit,
-    confidence: Number((item.confidence / 100).toFixed(2)),
-    confidencePercent: item.confidence,
-    matchedSymptoms: [],
-    reasoning: item.penjelasan,
-    urgency: mapUrgency(item.tingkat_urgensi),
-    recommendedDepartment: item.departemen,
-    pemeriksaanLanjutan: item.pemeriksaan_lanjutan ?? [],
-  }));
-}
-
 function smartQueueBaseUrl(): string | undefined {
   return env.SMARTQUEUE_AI_URL;
 }
 
-export async function fetchCdssHealth(): Promise<SmartQueueCdssHealth | null> {
+async function parseErrorDetail(resp: Response): Promise<string | undefined> {
+  try {
+    const body = (await resp.json()) as { detail?: string | Array<{ msg?: string }> };
+    if (typeof body.detail === "string") return body.detail;
+    if (Array.isArray(body.detail)) {
+      return body.detail.map((item) => item.msg).filter(Boolean).join("; ");
+    }
+  } catch {
+    // ignore parse errors
+  }
+  return undefined;
+}
+
+export async function fetchCdssHealth(): Promise<CdssHealthResponse | null> {
   const base = smartQueueBaseUrl();
   if (!base) return null;
 
@@ -72,7 +53,7 @@ export async function fetchCdssHealth(): Promise<SmartQueueCdssHealth | null> {
     const url = new URL("/cdss/health", base);
     const resp = await fetch(url, { signal: AbortSignal.timeout(5000) });
     if (!resp.ok) return null;
-    return (await resp.json()) as SmartQueueCdssHealth;
+    return (await resp.json()) as CdssHealthResponse;
   } catch (err) {
     logger.warn({ err }, "SmartQueue CDSS health check failed");
     return null;
@@ -81,9 +62,11 @@ export async function fetchCdssHealth(): Promise<SmartQueueCdssHealth | null> {
 
 export async function fetchCdssRecommend(
   payload: SmartQueueCdssRequest,
-): Promise<SmartQueueCdssResponse | null> {
+): Promise<SmartQueueCdssResponse> {
   const base = smartQueueBaseUrl();
-  if (!base) return null;
+  if (!base) {
+    throw new ServiceUnavailableError("SMARTQUEUE_AI_URL belum dikonfigurasi");
+  }
 
   try {
     const url = new URL("/cdss/recommend", base);
@@ -95,23 +78,25 @@ export async function fetchCdssRecommend(
     });
 
     if (!resp.ok) {
-      logger.warn({ status: resp.status }, "SmartQueue CDSS /recommend failed");
-      return null;
+      const detail = await parseErrorDetail(resp);
+      throw new ServiceUnavailableError(
+        detail ?? `SmartQueue CDSS /recommend gagal (${resp.status})`,
+      );
     }
 
     const body = (await resp.json()) as SmartQueueCdssResponse;
     if (body.status !== "success" || !Array.isArray(body.kandidat_diagnosis)) {
-      logger.warn({ body }, "SmartQueue CDSS returned unexpected payload");
-      return null;
+      throw new ServiceUnavailableError("SmartQueue CDSS mengembalikan respons tidak valid");
     }
 
     return body;
   } catch (err) {
+    if (err instanceof ServiceUnavailableError) throw err;
     logger.warn({ err }, "SmartQueue CDSS recommend request failed");
-    return null;
+    throw new ServiceUnavailableError("Layanan SmartQueue CDSS tidak dapat dijangkau");
   }
 }
 
-export function isCdssAiAvailable(health: SmartQueueCdssHealth | null): boolean {
+export function isCdssAiAvailable(health: CdssHealthResponse | null): boolean {
   return health?.status === "healthy" && health.gemini_api_configured === true;
 }

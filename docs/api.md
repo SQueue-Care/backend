@@ -103,22 +103,32 @@ Transisi status yang diizinkan (state machine):
 
 Fallback heuristik dipakai otomatis ketika `ML_SERVICE_URL` kosong atau ML service error. Respons menyertakan `source: "ml" \| "heuristic"`.
 
-## CDSS (SmartQueue Gemini + rule-based fallback)
+## CDSS (SmartQueue AI — POST /cdss/recommend)
 
-| Method | Path                       | Auth            | Deskripsi                                                                                    |
-| ------ | -------------------------- | --------------- | -------------------------------------------------------------------------------------------- |
-| GET    | `/cdss/symptoms`           | 🔒              | Master data gejala.                                                                          |
-| GET    | `/cdss/ai-status`          | 🔒 doctor/admin | Status layanan Gemini (`configured`, `available`, `status`, `message`).                      |
-| POST   | `/cdss/recommend`          | 🔒 doctor/admin | Input `{ gejala?, symptoms?, patientId?, queueId? }` — wajib salah satu: `gejala` atau `symptoms`. |
-| POST   | `/cdss/analyze-notes`      | 🔒 doctor/admin | Input `{ notes, patientId?, queueId? }` — analisis catatan klinis (Gemini, fallback LLM).    |
-| GET    | `/cdss/history/:patientId` | 🔒 doctor/admin | Riwayat rekomendasi CDSS untuk pasien.                                                       |
-| GET    | `/cdss/latest`             | 🔒 doctor/admin | Rekomendasi terakhir oleh dokter yang login.                                                 |
-| GET    | `/cdss/by-queue/:queueId`  | 🔒 doctor/admin | Rekomendasi terakhir untuk antrian tertentu.                                                 |
-| GET    | `/cdss/results`            | 🔒 doctor/admin | Riwayat rekomendasi dokter (`?limit=20`).                                                    |
+| Method | Path                       | Auth            | Deskripsi                                                                 |
+| ------ | -------------------------- | --------------- | ------------------------------------------------------------------------- |
+| GET    | `/cdss/health`             | 🔒 doctor/admin | Proxy ke SmartQueue `GET /cdss/health`                                    |
+| GET    | `/cdss/ai-status`          | 🔒 doctor/admin | Alias health + field `available`                                          |
+| POST   | `/cdss/recommend`          | 🔒 doctor/admin | Proxy ke SmartQueue `POST /cdss/recommend` — body: `{ gejala, umur?, jenis_kelamin?, patientId?, queueId? }` |
+| POST   | `/cdss/analyze-notes`      | 🔒 doctor/admin | Alias `{ notes }` → dipetakan ke `gejala`                                 |
+| GET    | `/cdss/history/:patientId` | 🔒 doctor/admin | Riwayat rekomendasi CDSS untuk pasien                                     |
+| GET    | `/cdss/latest`             | 🔒 doctor/admin | Rekomendasi terakhir oleh dokter yang login                               |
+| GET    | `/cdss/by-queue/:queueId`  | 🔒 doctor/admin | Rekomendasi terakhir untuk antrian tertentu                               |
+| GET    | `/cdss/results`            | 🔒 doctor/admin | Riwayat rekomendasi dokter (`?limit=20`)                                  |
 
-Integrasi AI memakai `SMARTQUEUE_AI_URL` → `POST /cdss/recommend` (FastAPI). Jika gagal dan request memuat `symptoms[]`, sistem fallback ke engine rule-based.
+Response mengikuti struktur SmartQueue API:
 
-Response `recommend` / `analyze-notes` menyertakan: `source` (`gemini` \| `rule-based` \| `legacy-llm`), `identifiedSymptoms`, `catatanMedis` (Gemini), `candidates`, `disclaimer`.
+```json
+{
+  "gejala_teridentifikasi": ["..."],
+  "kandidat_diagnosis": [{ "nama_penyakit", "tingkat_urgensi", "confidence", "departemen", "penjelasan", "pemeriksaan_lanjutan" }],
+  "catatan_medis": "...",
+  "disclaimer": "...",
+  "status": "success"
+}
+```
+
+`umur` dan `jenis_kelamin` otomatis diisi dari profil pasien jika `patientId` dikirim.
 
 Catatan: Hasil CDSS adalah **rekomendasi awal**, bukan diagnosis final. Keputusan medis tetap pada dokter.
 
