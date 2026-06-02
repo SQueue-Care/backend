@@ -29,7 +29,7 @@ export function mapGenderToSmartQueue(gender: Gender | null | undefined): "L" | 
 }
 
 function smartQueueBaseUrl(): string | undefined {
-  return env.SMARTQUEUE_AI_URL;
+  return env.ML_SERVICE_URL;
 }
 
 async function parseErrorDetail(resp: Response): Promise<string | undefined> {
@@ -65,7 +65,7 @@ export async function fetchCdssRecommend(
 ): Promise<SmartQueueCdssResponse> {
   const base = smartQueueBaseUrl();
   if (!base) {
-    throw new ServiceUnavailableError("SMARTQUEUE_AI_URL belum dikonfigurasi");
+    throw new ServiceUnavailableError("ML_SERVICE_URL belum dikonfigurasi");
   }
 
   try {

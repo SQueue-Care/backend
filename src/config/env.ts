@@ -30,11 +30,6 @@ const envSchema = z.object({
     .optional()
     .transform((v) => (v && v.trim().length > 0 ? v : undefined)),
 
-  SMARTQUEUE_AI_URL: z
-    .string()
-    .optional()
-    .transform((v) => (v && v.trim().length > 0 ? v : undefined)),
-
   LLM_API_BASE_URL: z
     .string()
     .optional()

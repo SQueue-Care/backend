@@ -82,7 +82,7 @@ Variabel penting:
 - `DATABASE_URL` — koneksi pooled Supabase (port 6543) untuk runtime.
 - `DIRECT_URL` — koneksi direct (port 5432) untuk `prisma migrate`.
 - `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET` — minimal 16 karakter.
-- `ML_SERVICE_URL` — opsional. Jika kosong, estimasi waktu tunggu pakai heuristik lokal.
+- `ML_SERVICE_URL` — opsional. Jika kosong, estimasi waktu tunggu pakai heuristik lokal; CDSS SmartQueue juga membutuhkan variabel ini.
 
 ### 3. Migrate & seed database
 

@@ -148,7 +148,7 @@ async function attachSessionMeta(
  * Returns null on failure so the caller falls back to heuristic.
  */
 async function mlEstimate(query: WaitTimeQuery): Promise<WaitTimeEstimate | null> {
-  if (!env.SMARTQUEUE_AI_URL) return null;
+  if (!env.ML_SERVICE_URL) return null;
 
   try {
     const wibDateString = getWibDateString(query.queueDate);
@@ -210,7 +210,7 @@ async function mlEstimate(query: WaitTimeQuery): Promise<WaitTimeEstimate | null
 
     logger.debug({ payload }, "Calling SmartQueue AI /predict");
 
-    const url = new URL("/predict", env.SMARTQUEUE_AI_URL);
+    const url = new URL("/predict", env.ML_SERVICE_URL);
     const resp = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

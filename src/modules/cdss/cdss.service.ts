@@ -215,11 +215,11 @@ async function callSmartQueueCdss(
 
 /** Selaras SmartQueue GET /cdss/health */
 export async function getCdssHealth(): Promise<CdssHealthResponse> {
-  if (!env.SMARTQUEUE_AI_URL) {
+  if (!env.ML_SERVICE_URL) {
     return {
       status: "not_configured",
       gemini_api_configured: false,
-      message: "SMARTQUEUE_AI_URL belum dikonfigurasi",
+      message: "ML_SERVICE_URL belum dikonfigurasi",
     };
   }
 
