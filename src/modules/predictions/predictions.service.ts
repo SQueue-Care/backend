@@ -2,7 +2,7 @@ import { PatientType, QueuePriority, QueueStatus } from "@prisma/client";
 import { env } from "../../config/env";
 import { logger } from "../../config/logger";
 import { prisma } from "../../config/prisma";
-import { parseSessionStartHour, resolveSessionMetaFromSchedule } from "../queues/session-time";
+import { resolveEffectiveArrivalHour, resolveSessionMetaFromSchedule } from "../queues/session-time";
 import { mapDepartmentName } from "./department-name-mapper";
 import type { WaitTimeQuery } from "./predictions.schema";
 
@@ -106,17 +106,22 @@ async function heuristicEstimate(query: WaitTimeQuery): Promise<WaitTimeEstimate
 async function resolveArrivalHour(query: WaitTimeQuery): Promise<number> {
   if (query.arrivalHour != null) return query.arrivalHour;
 
+  const referenceNow = new Date();
+  const queueDate = query.queueDate
+    ? new Date(`${getWibDateString(query.queueDate)}T12:00:00.000Z`)
+    : new Date(`${getWibDateString()}T12:00:00.000Z`);
+
   if (query.scheduleId) {
     const schedule = await prisma.schedule.findUnique({
       where: { id: query.scheduleId },
       select: { startTime: true },
     });
     if (schedule?.startTime) {
-      return parseSessionStartHour(schedule.startTime);
+      return resolveEffectiveArrivalHour(queueDate, schedule.startTime, referenceNow);
     }
   }
 
-  return new Date().getHours();
+  return resolveEffectiveArrivalHour(queueDate, null, referenceNow);
 }
 
 async function attachSessionMeta(
@@ -138,7 +143,7 @@ async function attachSessionMeta(
 
   return {
     ...estimate,
-    ...resolveSessionMetaFromSchedule(queueDate, startTime, estimate.estimatedMinutes),
+    ...resolveSessionMetaFromSchedule(queueDate, startTime, estimate.estimatedMinutes, new Date()),
   };
 }
 

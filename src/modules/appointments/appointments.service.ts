@@ -10,7 +10,6 @@ import {
 } from "../booking/booking-capacity";
 import { estimateWaitTime } from "../predictions/predictions.service";
 import { QUEUE_INCLUDE, serializeQueue } from "../queues/queues.service";
-import { parseSessionStartHour } from "../queues/session-time";
 import type { CreateAppointmentInput, UpdateAppointmentInput } from "./appointments.schema";
 
 const INCLUDE = {
@@ -156,24 +155,12 @@ export async function checkInAppointment(id: string, actor: Express.UserPayload)
 
   const targetDate = toBookingDate(appointment.scheduledAt);
 
-  let arrivalHour = scheduledTime.getHours();
-  if (appointment.scheduleId) {
-    const schedule = await prisma.schedule.findUnique({
-      where: { id: appointment.scheduleId },
-      select: { startTime: true },
-    });
-    if (schedule?.startTime) {
-      arrivalHour = parseSessionStartHour(schedule.startTime);
-    }
-  }
-
   const estimate = await estimateWaitTime({
     departmentId: appointment.departmentId,
     doctorId: appointment.doctorId,
     scheduleId: appointment.scheduleId ?? undefined,
     patientId: appointment.patientId!,
     queueDate: targetDate,
-    arrivalHour,
   });
 
   const result = await withSerializableTransaction(async (tx) => {

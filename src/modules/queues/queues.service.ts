@@ -31,7 +31,7 @@ import type {
   UpdateQueueStatusInput,
   UpdateVisitStageInput,
 } from "./queues.schema";
-import { parseSessionStartHour, resolveQueueSessionMeta } from "./session-time";
+import { resolveQueueSessionMeta } from "./session-time";
 import { buildVisitFlow, resolvePharmacyRequired, type VisitFlowPayload } from "./visit-flow";
 
 export const QUEUE_INCLUDE = {
@@ -146,17 +146,6 @@ export async function createQueue(input: CreateQueueInput, actor: Express.UserPa
 
   const targetDate = startOfDay(input.date);
 
-  let arrivalHour = new Date().getHours();
-  if (input.scheduleId) {
-    const schedule = await prisma.schedule.findUnique({
-      where: { id: input.scheduleId },
-      select: { startTime: true },
-    });
-    if (schedule?.startTime) {
-      arrivalHour = parseSessionStartHour(schedule.startTime);
-    }
-  }
-
   const estimate = await estimateWaitTime({
     departmentId: input.departmentId,
     doctorId: input.doctorId,
@@ -164,7 +153,6 @@ export async function createQueue(input: CreateQueueInput, actor: Express.UserPa
     patientId,
     priority: input.priority ?? QueuePriority.NORMAL,
     patientType: input.patientType ?? PatientType.RAWAT_JALAN,
-    arrivalHour,
     queueDate: targetDate,
   });
 
