@@ -4,8 +4,6 @@ import { logger } from "../../config/logger";
 import { ServiceUnavailableError } from "../../utils/errors";
 import type { CdssHealthResponse, CdssKandidatDiagnosis } from "./cdss.types";
 
-const CDSS_TIMEOUT_MS = 30_000;
-
 export interface SmartQueueCdssRequest {
   gejala: string;
   umur?: number;
@@ -51,7 +49,7 @@ export async function fetchCdssHealth(): Promise<CdssHealthResponse | null> {
 
   try {
     const url = new URL("/cdss/health", base);
-    const resp = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    const resp = await fetch(url, { signal: AbortSignal.timeout(env.ML_SERVICE_HEALTH_TIMEOUT_MS) });
     if (!resp.ok) return null;
     return (await resp.json()) as CdssHealthResponse;
   } catch (err) {
@@ -74,7 +72,7 @@ export async function fetchCdssRecommend(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(CDSS_TIMEOUT_MS),
+      signal: AbortSignal.timeout(env.ML_SERVICE_TIMEOUT_MS),
     });
 
     if (!resp.ok) {

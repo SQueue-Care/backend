@@ -32,6 +32,7 @@ import type {
   UpdateVisitStageInput,
 } from "./queues.schema";
 import { resolveQueueSessionMeta } from "./session-time";
+import { countWaitingAhead, resolveLiveWaitingAhead } from "./queue-position";
 import { buildVisitFlow, resolvePharmacyRequired, type VisitFlowPayload } from "./visit-flow";
 
 export const QUEUE_INCLUDE = {
@@ -67,6 +68,7 @@ export type SerializedQueue = Omit<
 > & {
   doctorNotes: SerializedDoctorNotes;
   currentServingNumber?: number | null;
+  waitingAhead?: number | null;
   visitFlow: VisitFlowPayload;
   nextDestination: VisitFlowPayload["nextDestination"];
   sessionStartAt: string | null;
@@ -88,10 +90,11 @@ function serializeDoctorNotes(queue: QueueWithDoctorFields): SerializedDoctorNot
 
 export function serializeQueue<T extends QueueRecord>(
   queue: T,
-  extra?: { currentServingNumber?: number | null },
+  extra?: { currentServingNumber?: number | null; waitingAhead?: number | null },
 ): Omit<T, "doctorDiagnosis" | "doctorMedicationInstructions" | "doctorAdvice"> & {
   doctorNotes: SerializedDoctorNotes;
   currentServingNumber?: number | null;
+  waitingAhead?: number | null;
   visitFlow: VisitFlowPayload;
   nextDestination: VisitFlowPayload["nextDestination"];
 } {
@@ -244,7 +247,14 @@ export async function getQueue(id: string) {
     currentServingNumber = lastDone?.queueNumber || null;
   }
 
-  return serializeQueue(queue, { currentServingNumber });
+  const aheadCount = await countWaitingAhead(prisma, {
+    departmentId: queue.departmentId,
+    queueDate: targetDate,
+    queueNumber: queue.queueNumber,
+  });
+  const waitingAhead = resolveLiveWaitingAhead(queue.status, aheadCount);
+
+  return serializeQueue(queue, { currentServingNumber, waitingAhead });
 }
 
 export async function listQueues(filters: ListQueuesQuery) {

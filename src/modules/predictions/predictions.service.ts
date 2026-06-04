@@ -220,7 +220,7 @@ async function mlEstimate(query: WaitTimeQuery): Promise<WaitTimeEstimate | null
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(env.ML_SERVICE_TIMEOUT_MS),
     });
 
     if (!resp.ok) throw new Error(`SmartQueue AI responded ${resp.status}`);

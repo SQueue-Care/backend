@@ -30,6 +30,11 @@ const envSchema = z.object({
     .optional()
     .transform((v) => (v && v.trim().length > 0 ? v : undefined)),
 
+  /** Timeout panggilan ke SmartQueue AI (prediksi + CDSS), ms. Default 90s untuk cold start Azure. */
+  ML_SERVICE_TIMEOUT_MS: z.coerce.number().int().positive().default(90_000),
+  /** Timeout health check ke SmartQueue AI, ms. */
+  ML_SERVICE_HEALTH_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+
   LLM_API_BASE_URL: z
     .string()
     .optional()
