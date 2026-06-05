@@ -1,58 +1,61 @@
 /**
- * Maps internal department names (stored in DB) to the nama_poli values
- * accepted by the SmartQueue AI FastAPI service.
+ * Maps internal department names (stored in DB) to nama_poli values
+ * accepted by SmartQueue AI API v5.
  *
- * FastAPI supported values:
- * Anak, Poli Anak, Gigi, Poli Gigi, Jantung, Poli Jantung,
- * Mata, Poli Mata, Penyakit Dalam, Poli Penyakit Dalam, Umum, Poli Umum
+ * Valid values: anak, gigi, jantung, kandungan, penyakit dalam, umum
  */
 const DEPT_NAME_MAP: Record<string, string> = {
   // Anak
-  anak: "Poli Anak",
-  "poli anak": "Poli Anak",
-  "kesehatan anak": "Poli Anak",
-  pediatri: "Poli Anak",
-  pediatrics: "Poli Anak",
+  anak: "anak",
+  "poli anak": "anak",
+  "kesehatan anak": "anak",
+  pediatri: "anak",
+  pediatrics: "anak",
 
   // Gigi
-  gigi: "Poli Gigi",
-  "poli gigi": "Poli Gigi",
-  "gigi dan mulut": "Poli Gigi",
-  dental: "Poli Gigi",
-  dentistry: "Poli Gigi",
+  gigi: "gigi",
+  "poli gigi": "gigi",
+  "gigi dan mulut": "gigi",
+  dental: "gigi",
+  dentistry: "gigi",
 
   // Jantung
-  jantung: "Poli Jantung",
-  "poli jantung": "Poli Jantung",
-  kardiologi: "Poli Jantung",
-  cardiology: "Poli Jantung",
-  "jantung dan pembuluh darah": "Poli Jantung",
+  jantung: "jantung",
+  "poli jantung": "jantung",
+  kardiologi: "jantung",
+  cardiology: "jantung",
+  "jantung dan pembuluh darah": "jantung",
 
-  // Mata
-  mata: "Poli Mata",
-  "poli mata": "Poli Mata",
-  oftalmologi: "Poli Mata",
-  ophthalmology: "Poli Mata",
+  // Kandungan / OBGYN
+  kandungan: "kandungan",
+  "poli kandungan": "kandungan",
+  kebidanan: "kandungan",
+  obgyn: "kandungan",
+  "obstetri dan ginekologi": "kandungan",
+  "obstetri ginekologi": "kandungan",
 
   // Penyakit Dalam
-  "penyakit dalam": "Penyakit Dalam",
-  "poli penyakit dalam": "Penyakit Dalam",
-  interna: "Penyakit Dalam",
-  "internal medicine": "Penyakit Dalam",
+  "penyakit dalam": "penyakit dalam",
+  "poli penyakit dalam": "penyakit dalam",
+  interna: "penyakit dalam",
+  "internal medicine": "penyakit dalam",
 
-  // Umum
-  umum: "Poli Umum",
-  "poli umum": "Poli Umum",
-  "pelayanan umum": "Poli Umum",
-  "general practice": "Poli Umum",
+  // Umum (fallback for general practice and unmapped specialties e.g. mata)
+  umum: "umum",
+  "poli umum": "umum",
+  "pelayanan umum": "umum",
+  "general practice": "umum",
+  mata: "umum",
+  "poli mata": "umum",
+  oftalmologi: "umum",
+  ophthalmology: "umum",
 };
 
-const FALLBACK_POLI = "Poli Umum";
+const FALLBACK_POLI = "umum";
 
 /**
  * Maps a department name from the database to the accepted nama_poli value
- * for the SmartQueue AI FastAPI service. Falls back to "Poli Umum" if
- * the department name is not recognized.
+ * for the SmartQueue AI API. Falls back to "umum" if not recognized.
  */
 export function mapDepartmentName(name: string): string {
   const normalized = name.toLowerCase().trim();

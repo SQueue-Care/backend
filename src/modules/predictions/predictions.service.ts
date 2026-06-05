@@ -1,4 +1,4 @@
-import { PatientType, QueuePriority, QueueStatus } from "@prisma/client";
+import { QueuePriority, QueueStatus } from "@prisma/client";
 import { env } from "../../config/env";
 import { logger } from "../../config/logger";
 import { prisma } from "../../config/prisma";
@@ -20,23 +20,21 @@ export interface WaitTimeEstimate {
 
 const DEFAULT_AVG_SERVICE_MIN = 10;
 
-/** Maps internal QueuePriority enum to the prioritas string expected by FastAPI */
-function mapPriority(priority?: QueuePriority): string {
-  const map: Record<QueuePriority, string> = {
-    DARURAT: "Darurat",
-    TINGGI: "Tinggi",
-    URGENT: "Urgent",
-    SEDANG: "Sedang",
-    NORMAL: "Normal",
-    RENDAH: "Rendah",
-  };
-  return map[priority ?? QueuePriority.NORMAL];
+/** Maps internal QueuePriority to SmartQueue API prioritas: "normal" | "urgent" */
+function mapPriority(priority?: QueuePriority): "normal" | "urgent" {
+  switch (priority) {
+    case QueuePriority.DARURAT:
+    case QueuePriority.TINGGI:
+    case QueuePriority.URGENT:
+      return "urgent";
+    default:
+      return "normal";
+  }
 }
 
-/** Maps internal PatientType enum to the status_pasien string expected by FastAPI */
-function mapPatientType(patientType?: PatientType): string {
-  if (patientType === PatientType.RAWAT_INAP) return "Rawat Inap";
-  return "Rawat Jalan";
+/** Maps insurance to SmartQueue API asuransi: "bpjs" | "umum" */
+function mapAsuransi(hasBpjs: boolean): "bpjs" | "umum" {
+  return hasBpjs ? "bpjs" : "umum";
 }
 
 /** Calculates age in years from a birth date */
@@ -186,7 +184,7 @@ async function mlEstimate(query: WaitTimeQuery): Promise<WaitTimeEstimate | null
 
     // Fetch patient data for umur and asuransi
     let umur = 30; // sensible default
-    let asuransi = "Umum";
+    let hasBpjs = false;
     if (query.patientId) {
       const patient = await prisma.patient.findUnique({
         where: { id: query.patientId },
@@ -195,9 +193,7 @@ async function mlEstimate(query: WaitTimeQuery): Promise<WaitTimeEstimate | null
       if (patient?.birthDate) {
         umur = calculateAge(patient.birthDate);
       }
-      if (patient?.bpjsNumber) {
-        asuransi = "BPJS";
-      }
+      hasBpjs = Boolean(patient?.bpjsNumber);
     }
 
     const arrivalHour = await resolveArrivalHour(query);
@@ -206,16 +202,15 @@ async function mlEstimate(query: WaitTimeQuery): Promise<WaitTimeEstimate | null
       umur,
       jumlah_antrian: waitingAhead,
       jam_kedatangan: arrivalHour,
-      asuransi,
+      asuransi: mapAsuransi(hasBpjs),
       prioritas: mapPriority(query.priority),
-      status_pasien: mapPatientType(query.patientType),
       nama_poli: mapDepartmentName(department?.name ?? ""),
       tanggal: formatDate(today),
     };
 
-    logger.debug({ payload }, "Calling SmartQueue AI /predict");
+    logger.debug({ payload }, "Calling SmartQueue AI /predict/");
 
-    const url = new URL("/predict", env.ML_SERVICE_URL);
+    const url = new URL("/predict/", env.ML_SERVICE_URL);
     const resp = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -234,7 +229,7 @@ async function mlEstimate(query: WaitTimeQuery): Promise<WaitTimeEstimate | null
     return {
       estimatedMinutes: Math.max(0, Math.round(body.predicted_waiting_time_minutes)),
       source: "ml",
-      modelVersion: "smartqueue-deeplearning-v4",
+      modelVersion: "smartqueue-deeplearning-v5",
       kategori: body.kategori_waktu_tunggu,
       waitingAhead,
       avgServiceMinutes: avgService,
