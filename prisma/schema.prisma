@@ -1,0 +1,450 @@
+// Prisma schema for Intelligent Healthcare Queue & CDSS
+// Reference: src/modules/* (each module maps to one or more models below)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ---------- Enums ----------
+
+enum Role {
+  PATIENT
+  DOCTOR
+  ADMIN
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum QueueStatus {
+  WAITING
+  CALLED
+  IN_PROGRESS
+  DONE
+  SKIPPED
+  CANCELLED
+}
+
+enum AppointmentStatus {
+  BOOKED
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  NO_SHOW
+}
+
+enum PaymentType {
+  BPJS
+  UMUM
+  ASURANSI_SWASTA
+}
+
+enum BillStatus {
+  PENDING
+  PAID
+  WAIVED
+  BPJS_PENDING
+}
+
+enum VisitStage {
+  REGISTRATION
+  WAITING
+  EXAMINATION
+  ADMIN
+  PHARMACY
+  COMPLETE
+}
+
+enum DayOfWeek {
+  MONDAY
+  TUESDAY
+  WEDNESDAY
+  THURSDAY
+  FRIDAY
+  SATURDAY
+  SUNDAY
+}
+
+enum NotificationType {
+  GLOBAL
+  QUEUE_STATUS
+  BILLING
+  SYSTEM
+}
+
+enum AnnouncementPriority {
+  LOW
+  NORMAL
+  HIGH
+}
+
+enum AnnouncementCategory {
+  INFO
+  WARNING
+  SERVICE
+}
+
+enum TargetRole {
+  ALL
+  PATIENT
+  DOCTOR
+  ADMIN
+}
+
+enum QueuePriority {
+  DARURAT
+  TINGGI
+  URGENT
+  SEDANG
+  NORMAL
+  RENDAH
+}
+
+enum PatientType {
+  RAWAT_JALAN
+  RAWAT_INAP
+}
+
+// ---------- Auth / Users ----------
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         Role     @default(PATIENT)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  patient       Patient?
+  doctor        Doctor?
+  refreshTokens RefreshToken[]
+  notifications Notification[]
+
+  @@index([role])
+}
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ---------- Domain ----------
+
+model Patient {
+  id         String    @id @default(cuid())
+  userId     String    @unique
+  nik        String?   @unique
+  bpjsNumber String?   @unique
+  phone      String?
+  gender     Gender?
+  birthDate  DateTime?
+  bloodType  String?
+  allergies  String?   @db.Text
+  address    String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  queues       Queue[]
+  appointments Appointment[]
+  cdssResults  CDSSResult[]
+  bills        Bill[]
+}
+
+model Doctor {
+  id             String   @id @default(cuid())
+  userId         String   @unique
+  specialization String
+  licenseNumber  String?  @unique
+  departmentId   String?
+  avgServiceMin  Int      @default(10) // rata-rata durasi layanan (menit), dipakai heuristik ETA
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  department   Department?   @relation(fields: [departmentId], references: [id])
+  schedules    Schedule[]
+  queues       Queue[]
+  appointments Appointment[]
+
+  @@index([departmentId])
+}
+
+model Department {
+  id                String   @id @default(cuid())
+  code              String   @unique
+  name              String
+  description       String?
+  building          String?  @default("Gedung Utama")
+  waitingRoomName   String?
+  examinationRoom   String?
+  adminCounter      String?
+  pharmacyLocation  String?
+  dailyBookingQuota Int      @default(200) // maks. booking (antrian + reservasi) per hari per poli
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  doctors              Doctor[]
+  schedules            Schedule[]
+  queues               Queue[]
+  appointments         Appointment[]
+  departmentDayCaps    DepartmentDayCapacity[]
+}
+
+model Schedule {
+  id           String    @id @default(cuid())
+  doctorId     String
+  departmentId String
+  dayOfWeek    DayOfWeek
+  startTime    String // "HH:mm", disimpan string agar agnostik timezone
+  endTime      String // "HH:mm"
+  capacity     Int       @default(30)
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  doctor       Doctor        @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  department   Department    @relation(fields: [departmentId], references: [id])
+  queues       Queue[]
+  appointments Appointment[]
+  dayCaps      ScheduleDayCapacity[]
+
+  @@index([doctorId, dayOfWeek])
+  @@index([departmentId, dayOfWeek])
+}
+
+// Pelacakan kapasitas terpesan per jadwal per tanggal (atomic counter untuk cegah overbooking)
+model ScheduleDayCapacity {
+  id          String   @id @default(cuid())
+  scheduleId  String
+  bookingDate DateTime @db.Date
+  bookedCount Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  schedule Schedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+
+  @@unique([scheduleId, bookingDate])
+  @@index([bookingDate])
+}
+
+// Pelacakan kuota harian per poli (antrian + reservasi)
+model DepartmentDayCapacity {
+  id           String   @id @default(cuid())
+  departmentId String
+  bookingDate  DateTime @db.Date
+  bookedCount  Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+
+  @@unique([departmentId, bookingDate])
+  @@index([bookingDate])
+}
+
+model Queue {
+  id                   String      @id @default(cuid())
+  patientId            String
+  departmentId         String
+  doctorId             String?
+  scheduleId           String?
+  queueNumber          Int
+  status               QueueStatus @default(WAITING)
+  queueDate            DateTime    @db.Date
+  checkInAt            DateTime    @default(now())
+  calledAt             DateTime?
+  startedAt            DateTime?
+  finishedAt           DateTime?
+  cancelledAt          DateTime?
+  priority             QueuePriority @default(NORMAL)
+  patientType          PatientType   @default(RAWAT_JALAN)
+  estimatedWaitMinutes Int?
+  actualWaitMinutes    Int?
+  notes                String?
+  doctorDiagnosis              String? @db.Text
+  doctorMedicationInstructions String? @db.Text
+  doctorAdvice                 String? @db.Text
+  currentVisitStage    VisitStage  @default(WAITING)
+  pharmacyRequired     Boolean     @default(false)
+  adminArrivedAt       DateTime?
+  pharmacyCompletedAt  DateTime?
+  visitCompletedAt     DateTime?
+  createdAt            DateTime    @default(now())
+  updatedAt            DateTime    @updatedAt
+
+  patient    Patient             @relation(fields: [patientId], references: [id])
+  department Department          @relation(fields: [departmentId], references: [id])
+  doctor     Doctor?             @relation(fields: [doctorId], references: [id])
+  schedule   Schedule?           @relation(fields: [scheduleId], references: [id])
+  prediction WaitTimePrediction?
+  bill       Bill?
+
+  @@unique([departmentId, queueDate, queueNumber])
+  @@index([status])
+  @@index([queueDate])
+  @@index([patientId])
+}
+
+model Appointment {
+  id           String            @id @default(cuid())
+  patientId    String
+  doctorId     String
+  departmentId String
+  scheduleId   String?
+  scheduledAt  DateTime
+  status       AppointmentStatus @default(BOOKED)
+  cancellationReason String? @db.Text //perubahan
+  notes        String?
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  patient    Patient    @relation(fields: [patientId], references: [id])
+  doctor     Doctor     @relation(fields: [doctorId], references: [id])
+  department Department @relation(fields: [departmentId], references: [id])
+  schedule   Schedule?  @relation(fields: [scheduleId], references: [id])
+
+  @@index([patientId])
+  @@index([doctorId])
+  @@index([scheduledAt])
+}
+
+model WaitTimePrediction {
+  id           String   @id @default(cuid())
+  queueId      String   @unique
+  estimatedMin Int
+  source       String // "ml" | "heuristic"
+  modelVersion String?
+  kategori     String? // "Cepat" | "Normal" | "Lama" | "Sangat Lama"
+  features     Json?
+  createdAt    DateTime @default(now())
+
+  queue Queue @relation(fields: [queueId], references: [id], onDelete: Cascade)
+}
+
+// ---------- CDSS ----------
+
+model Symptom {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  label       String
+  description String?
+  createdAt   DateTime @default(now())
+}
+
+model CDSSResult {
+  id         String   @id @default(cuid())
+  patientId  String?
+  doctorId   String?
+  queueId    String?
+  notes      String?  @db.Text
+  symptoms   Json     // array of symptom codes or labels
+  candidates Json     // [{ diagnosis, confidence, reasoning? }]
+  engine     String   // "hermes-llm" | "rule-based"
+  createdAt  DateTime @default(now())
+
+  patient Patient? @relation(fields: [patientId], references: [id])
+
+  @@index([patientId])
+  @@index([doctorId])
+  @@index([queueId])
+}
+
+// ---------- Billing ----------
+
+model Bill {
+  id           String      @id @default(cuid())
+  patientId    String
+  queueId      String?     @unique
+  paymentType  PaymentType @default(UMUM)
+  status       BillStatus  @default(PENDING)
+  totalAmount  Int
+  patientShare Int?
+  sepNumber    String?
+  bpjsNumber   String?
+  dueDate      DateTime?
+  paidAt       DateTime?
+  notes        String?     @db.Text
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  patient   Patient        @relation(fields: [patientId], references: [id])
+  queue     Queue?         @relation(fields: [queueId], references: [id])
+  lineItems BillLineItem[]
+
+  @@index([patientId])
+  @@index([status])
+}
+
+model BillLineItem {
+  id          String @id @default(cuid())
+  billId      String
+  description String
+  quantity    Int    @default(1)
+  unitPrice   Int
+  amount      Int
+
+  bill Bill @relation(fields: [billId], references: [id], onDelete: Cascade)
+
+  @@index([billId])
+}
+
+// ---------- Notifications ----------
+
+model Announcement {
+  id         String               @id @default(cuid())
+  title      String
+  body       String               @db.Text
+  priority   AnnouncementPriority @default(NORMAL)
+  category   AnnouncementCategory @default(INFO)
+  targetRole TargetRole           @default(ALL)
+  activeFrom DateTime             @default(now())
+  activeTo   DateTime?
+  isActive   Boolean              @default(true)
+  createdById String?
+  createdAt  DateTime             @default(now())
+  updatedAt  DateTime             @updatedAt
+
+  @@index([isActive, activeFrom])
+  @@index([targetRole])
+}
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String?
+  role      TargetRole?
+  type      NotificationType
+  title     String
+  message   String           @db.Text
+  link      String?
+  readAt    DateTime?
+  metadata  Json?
+  createdAt DateTime         @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userId, readAt])
+  @@index([role])
+  @@index([createdAt])
+}
