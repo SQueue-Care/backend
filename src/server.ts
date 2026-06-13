@@ -1,8 +1,8 @@
+import cron from "node-cron";
 import { createApp } from "./app"; //import cron untuk penjadwalan reservasi kadaluarsa
 import { env } from "./config/env";
 import { logger } from "./config/logger";
 import { disconnectPrisma } from "./config/prisma";
-import cron from "node-cron";
 
 import { sweepExpiredAppointments } from "./modules/appointments/appointments.service";
 
@@ -20,7 +20,7 @@ cron.schedule("0 * * * *", async () => {
   }
 });
 
-const server = app.listen(env.PORT, () => {
+const server = app.listen(env.PORT, "127.0.0.1", () => {
   logger.info(`Server listening on http://localhost:${env.PORT} (${env.NODE_ENV})`);
 });
 
